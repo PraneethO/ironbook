@@ -10,8 +10,9 @@ import { Link } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import type { Health, ValidationReport } from '../api/types';
 import { Notice, Spinner, Stat } from '../components/ui';
+import { convertHeicFiles } from '../lib/heic';
 
-const IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.heic'];
+const IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.heic', '.heif'];
 const VIDEO_EXT = ['.mp4', '.mov'];
 
 function extOf(name: string): string {
@@ -42,6 +43,8 @@ export function NewWorld() {
   const [report, setReport] = useState<ValidationReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [videoNotice, setVideoNotice] = useState(false);
+  const [converting, setConverting] = useState(false);
+  const [convertError, setConvertError] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [starting, setStarting] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -52,10 +55,14 @@ export function NewWorld() {
     setSplatUploading(true);
     setError(null);
     try {
-      const proj = await apiClient.uploadSplat(file, name.trim() || 'Uploaded world');
+      const isPly = file.name.toLowerCase().endsWith('.ply');
+      const worldName = name.trim() || 'Uploaded world';
+      const proj = isPly
+        ? await apiClient.uploadPly(file, worldName)
+        : await apiClient.uploadSplat(file, worldName);
       navigate(`/projects/${proj.id}/viewer`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not upload that .splat file.');
+      setError(err instanceof Error ? err.message : 'Could not upload that file.');
       setSplatUploading(false);
     }
   };
@@ -76,14 +83,39 @@ export function NewWorld() {
     [files],
   );
 
-  const addFiles = (incoming: FileList | File[]) => {
+  const addFiles = async (incoming: FileList | File[]) => {
     const arr = Array.from(incoming);
     const hasVideo = arr.some((f) => VIDEO_EXT.includes(extOf(f.name)));
     // Video frame-extraction needs ffmpeg on the backend; show friendly note.
     if (hasVideo) setVideoNotice(true);
     const accepted = arr.filter((f) => IMAGE_EXT.includes(extOf(f.name)));
-    setFiles((cur) => [...cur, ...accepted]);
+    if (accepted.length === 0) return;
     setReport(null);
+    setConvertError(null);
+
+    // HEIC/HEIF (iPhone photos) can't be previewed or decoded downstream, so
+    // convert them to JPEG in the browser before they enter the upload set.
+    const needsConversion = accepted.some(
+      (f) => extOf(f.name) === '.heic' || extOf(f.name) === '.heif',
+    );
+    if (!needsConversion) {
+      setFiles((cur) => [...cur, ...accepted]);
+      return;
+    }
+
+    setConverting(true);
+    try {
+      const { files: converted, failed } = await convertHeicFiles(accepted);
+      setFiles((cur) => [...cur, ...converted]);
+      if (failed.length > 0) {
+        setConvertError(
+          `We couldn't convert ${failed.length} HEIC photo(s): ` +
+            `${failed.join(', ')}. Try exporting them as JPEG and adding again.`,
+        );
+      }
+    } finally {
+      setConverting(false);
+    }
   };
 
   const onDrop = (e: React.DragEvent) => {
@@ -191,7 +223,7 @@ export function NewWorld() {
         <input
           ref={inputRef}
           type="file"
-          accept=".jpg,.jpeg,.png,.heic,.mp4,.mov,image/*,video/*"
+          accept=".jpg,.jpeg,.png,.heic,.heif,.mp4,.mov,image/*,video/*"
           multiple
           style={{ display: 'none' }}
           onChange={(e) => e.target.files && addFiles(e.target.files)}
@@ -205,6 +237,11 @@ export function NewWorld() {
           photos and skipped the video — please add still photos for the best results.
         </Notice>
       )}
+
+      {converting && (
+        <Notice kind="info">Converting HEIC photos to JPEG…</Notice>
+      )}
+      {convertError && <Notice kind="warn">{convertError}</Notice>}
 
       <div className="stat-row">
         <Stat label="Photos selected" value={imageFiles.length} />
@@ -272,7 +309,7 @@ export function NewWorld() {
         {!report ? (
           <button
             className="btn btn-primary"
-            disabled={imageFiles.length === 0 || uploading}
+            disabled={imageFiles.length === 0 || uploading || converting}
             onClick={onUpload}
           >
             {uploading ? 'Uploading…' : 'Upload photos'}
@@ -293,19 +330,21 @@ export function NewWorld() {
         )}
       </div>
 
+      {converting && <Spinner label="Converting HEIC photos…" />}
       {uploading && <Spinner label="Checking your photos…" />}
 
-      {/* Direct .splat upload — skip reconstruction, navigate straight to viewer */}
+      {/* Direct .splat/.ply upload — skip reconstruction, navigate straight to viewer */}
       <div className="section" style={{ marginTop: 32, borderTop: '1px solid var(--border)', paddingTop: 24 }}>
-        <h2 style={{ marginBottom: 8 }}>Already have a .splat file?</h2>
+        <h2 style={{ marginBottom: 8 }}>Already have a .splat or .ply file?</h2>
         <p className="muted" style={{ marginBottom: 12 }}>
-          Upload a pre-built Gaussian-splat scene directly — no photos needed. The
-          agent will navigate it for you.
+          Upload a pre-built Gaussian-splat scene directly — no photos needed. A
+          trained 3DGS <code>.ply</code> (from any tool) is converted automatically.
+          The agent will navigate it for you.
         </p>
         <input
           ref={splatInputRef}
           type="file"
-          accept=".splat"
+          accept=".splat,.ply"
           style={{ display: 'none' }}
           onChange={onUploadSplat}
           data-testid="splat-file-input"
@@ -316,7 +355,7 @@ export function NewWorld() {
           onClick={() => splatInputRef.current?.click()}
           data-testid="upload-splat-btn"
         >
-          {splatUploading ? 'Uploading…' : '📦 Upload .splat'}
+          {splatUploading ? 'Uploading…' : '📦 Upload .splat / .ply'}
         </button>
       </div>
     </div>

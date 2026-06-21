@@ -142,6 +142,58 @@ export function transformPoint4(
   return [x, y, z, w];
 }
 
+/**
+ * Focal length in pixels for a vertical FOV and viewport height (square pixels,
+ * so fx == fy). Used for the `focal` uniform and {@link projectionCV}.
+ */
+export function focalLengthPx(fovYRadians: number, height: number): number {
+  return (0.5 * height) / Math.tan(fovYRadians / 2);
+}
+
+/**
+ * Perspective projection in antimatter15/splat's OpenCV convention: camera is
+ * x-right, y-down, +z forward (looks toward +z); clip.w = +cam.z and Y is
+ * flipped. Column-major. Pairs with {@link viewMatrixCV} to drive the splat
+ * shader, whose covariance Jacobian assumes this exact convention.
+ */
+export function projectionCV(
+  fovYRadians: number,
+  width: number,
+  height: number,
+  near: number,
+  far: number,
+): Mat4 {
+  const f = focalLengthPx(fovYRadians, height); // fx == fy
+  const m = new Float32Array(16);
+  m[0] = (2 * f) / width;
+  m[5] = -(2 * f) / height;
+  m[10] = far / (far - near);
+  m[11] = 1;
+  m[14] = -(far * near) / (far - near);
+  m[15] = 0;
+  return m;
+}
+
+/**
+ * View matrix in the OpenCV convention used by {@link projectionCV}: basis is
+ * x-right, y-down, z-forward (camera looks from `eye` toward `target`), so
+ * world-up appears at the top of the screen. Column-major, orthonormal
+ * (det +1, no mirroring).
+ */
+export function viewMatrixCV(eye: Vec3, target: Vec3, up: Vec3): Mat4 {
+  const zf = normalize(sub(target, eye)); // forward (+z, into the scene)
+  let xr = normalize(cross(zf, up)); // right (+x)
+  if (length(xr) < 1e-6) xr = normalize(cross(zf, [0, 0, 1]));
+  const yd = cross(zf, xr); // down (+y)
+
+  const m = new Float32Array(16);
+  m[0] = xr[0]; m[1] = yd[0]; m[2] = zf[0]; m[3] = 0;
+  m[4] = xr[1]; m[5] = yd[1]; m[6] = zf[1]; m[7] = 0;
+  m[8] = xr[2]; m[9] = yd[2]; m[10] = zf[2]; m[11] = 0;
+  m[12] = -dot(xr, eye); m[13] = -dot(yd, eye); m[14] = -dot(zf, eye); m[15] = 1;
+  return m;
+}
+
 /** View-space depth (distance along view -Z) of a world point. Larger = farther. */
 export function viewDepth(viewMatrix: Mat4, p: Vec3): number {
   // In view space, camera looks down -Z, so farther points have more negative z.

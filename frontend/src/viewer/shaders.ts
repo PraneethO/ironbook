@@ -1,165 +1,95 @@
 /**
- * shaders.ts — GLSL ES 3.00 source for the projected-quad Gaussian splat
- * renderer (antimatter15 / standard approach).
+ * shaders.ts — GLSL ES 3.00 Gaussian-splat shaders, ported verbatim from
+ * antimatter15/splat (with explicit attribute locations).
  *
- * Splat attributes live in float textures (u_data). Each drawn instance reads
- * a splat index from a per-instance integer attribute (`a_index`) that is
- * populated, in back-to-front order, from the depth-sort worker. This lets us
- * change *draw order* every frame (for correct alpha blending) without
- * re-uploading the (large, static) splat data.
+ * Splat data lives in an RGBA32UI texture (`u_texture`): 2 texels per splat —
+ * texel 0 holds the float position + packed RGBA color, texel 1 holds the 6
+ * half-float entries of the 3D covariance Σ. The vertex shader projects Σ to a
+ * 2D screen-space covariance via the perspective Jacobian, takes its eigen-
+ * decomposition to get the on-screen major/minor axes (scaled by √(2λ)), and
+ * stretches the instanced [-2,2] quad along them — giving a ~2.83σ footprint
+ * (vs. the previous hard 2σ cut). The fragment shader evaluates the Gaussian
+ * exp(-‖p‖²) and outputs premultiplied color for correct alpha compositing.
  *
- * The vertex shader projects the splat center to clip space, builds the 2D
- * screen-space covariance by projecting the 3D covariance (scale + rotation)
- * through the Jacobian of the perspective projection, then offsets the quad
- * corners along the covariance principal axes. The fragment shader evaluates
- * the Gaussian falloff times the splat color/alpha.
+ * Conventions: OpenCV-style camera (x-right, y-down, +z forward). The view and
+ * projection matrices are built to match (see math.ts viewMatrixCV /
+ * projectionCV); `focal` is the focal length in pixels, `viewport` the canvas
+ * size in pixels.
  */
 
 export const VERTEX_SHADER = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
-precision highp sampler2D;
 
-// Per-vertex quad corner in sigma units (e.g. [-2, 2]).
-layout(location = 0) in vec2 a_corner;
-// Per-instance splat index (into the data texture), back-to-front sorted.
-layout(location = 1) in uint a_index;
+uniform highp usampler2D u_texture;
+uniform mat4 projection, view;
+uniform vec2 focal;
+uniform vec2 viewport;
+uniform float u_splatScale; // our addition: 1.0 = antimatter default footprint
 
-uniform sampler2D u_data;  // RGBA32F, packed splat records
-uniform int u_texWidth;    // texels per row
-uniform int u_recordTexels; // texels per splat record
+layout(location = 0) in vec2 position;
+layout(location = 1) in int index;
 
-uniform mat4 u_view;
-uniform mat4 u_proj;
-uniform vec2 u_viewport;
-uniform float u_splatScale;
+out vec4 vColor;
+out vec2 vPosition;
 
-// Agent highlight
-uniform vec3 u_hlCenter;
-uniform float u_hlRadius;  // <= 0 means no highlight
-uniform float u_hlPulse;   // 0..1 animated
+void main () {
+    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
+    vec4 cam = view * vec4(uintBitsToFloat(cen.xyz), 1);
+    vec4 pos2d = projection * cam;
 
-out vec4 v_color;
-out vec2 v_offset;
-out float v_hl;
+    float clip = 1.2 * pos2d.w;
+    if (pos2d.z < -clip || pos2d.x < -clip || pos2d.x > clip || pos2d.y < -clip || pos2d.y > clip) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
 
-vec4 fetch(int recordTexel) {
-  int linear = int(a_index) * u_recordTexels + recordTexel;
-  int x = linear % u_texWidth;
-  int y = linear / u_texWidth;
-  return texelFetch(u_data, ivec2(x, y), 0);
-}
+    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+    vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
+    mat3 Vrk = mat3(u1.x, u1.y, u2.x, u1.y, u2.y, u3.x, u2.x, u3.x, u3.y);
 
-mat3 quatToMat3(vec4 q) {
-  float w = q.x, x = q.y, y = q.z, z = q.w;
-  float x2 = x + x, y2 = y + y, z2 = z + z;
-  float xx = x * x2, xy = x * y2, xz = x * z2;
-  float yy = y * y2, yz = y * z2, zz = z * z2;
-  float wx = w * x2, wy = w * y2, wz = w * z2;
-  return mat3(
-    1.0 - (yy + zz), xy + wz,         xz - wy,
-    xy - wz,         1.0 - (xx + zz), yz + wx,
-    xz + wy,         yz - wx,         1.0 - (xx + yy)
-  );
-}
+    mat3 J = mat3(
+        focal.x / cam.z, 0., -(focal.x * cam.x) / (cam.z * cam.z),
+        0., -focal.y / cam.z, (focal.y * cam.y) / (cam.z * cam.z),
+        0., 0., 0.
+    );
 
-void main() {
-  // record layout (3 texels): [pos.xyz, scale.x], [scale.yz, quat.wx], [quat.yz, color.rg(packed?)]
-  // We use 4 texels for clarity: pos+sx, scale.yz+_, color rgba, quat wxyz.
-  vec4 t0 = fetch(0); // pos.xyz, scale.x
-  vec4 t1 = fetch(1); // scale.y, scale.z, _, _
-  vec4 t2 = fetch(2); // color rgba (0..1)
-  vec4 t3 = fetch(3); // quat w,x,y,z
+    mat3 T = transpose(mat3(view)) * J;
+    mat3 cov2d = transpose(T) * Vrk * T;
 
-  vec3 center = t0.xyz;
-  vec3 s = max(vec3(t0.w, t1.x, t1.y), vec3(1e-6)) * u_splatScale;
-  vec4 color = t2;
-  vec4 quat = normalize(t3);
+    float mid = (cov2d[0][0] + cov2d[1][1]) / 2.0;
+    float radius = length(vec2((cov2d[0][0] - cov2d[1][1]) / 2.0, cov2d[0][1]));
+    float lambda1 = mid + radius, lambda2 = mid - radius;
 
-  vec4 viewPos = u_view * vec4(center, 1.0);
-  if (viewPos.z > 0.0) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    v_color = vec4(0.0);
-    v_offset = vec2(0.0);
-    return;
-  }
+    if (lambda2 < 0.0) return;
+    vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
+    vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
+    vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
 
-  mat3 R = quatToMat3(quat);
-  mat3 S = mat3(s.x, 0.0, 0.0, 0.0, s.y, 0.0, 0.0, 0.0, s.z);
-  mat3 M = R * S;
-  mat3 Sigma = M * transpose(M);
+    vColor = clamp(pos2d.z / pos2d.w + 1.0, 0.0, 1.0) *
+        vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
+    vPosition = position;
 
-  float fx = u_proj[0][0] * u_viewport.x * 0.5;
-  float fy = u_proj[1][1] * u_viewport.y * 0.5;
-  float z = viewPos.z;
-  float zinv = 1.0 / z;
-  float zinv2 = zinv * zinv;
-  mat3 J = mat3(
-    fx * zinv, 0.0,       0.0,
-    0.0,       fy * zinv, 0.0,
-    -fx * viewPos.x * zinv2, -fy * viewPos.y * zinv2, 0.0
-  );
-  mat3 W = mat3(u_view);
-  mat3 T = J * W;
-  mat3 cov = T * Sigma * transpose(T);
-
-  float a = cov[0][0] + 0.3;
-  float b = cov[0][1];
-  float c = cov[1][1] + 0.3;
-
-  float trace = a + c;
-  float det = a * c - b * b;
-  float mid = 0.5 * trace;
-  float disc = sqrt(max(mid * mid - det, 0.0));
-  float l1 = mid + disc;
-  float l2 = max(mid - disc, 0.0);
-
-  vec2 e1 = (abs(b) < 1e-6)
-    ? ((a >= c) ? vec2(1.0, 0.0) : vec2(0.0, 1.0))
-    : normalize(vec2(b, l1 - a));
-  vec2 e2 = vec2(-e1.y, e1.x);
-
-  float r1 = sqrt(l1);
-  float r2 = sqrt(l2);
-
-  vec4 clip = u_proj * viewPos;
-  vec2 ndc = clip.xy / clip.w;
-  vec2 px = a_corner.x * r1 * e1 + a_corner.y * r2 * e2;
-  vec2 ndcOffset = 2.0 * px / u_viewport;
-
-  gl_Position = vec4(ndc + ndcOffset, clip.z / clip.w, 1.0);
-  v_color = color;
-  v_offset = a_corner;
-  // Highlight: smooth sphere around agent-picked point (pulse baked in)
-  float hlBase = (u_hlRadius > 0.0)
-    ? smoothstep(u_hlRadius, u_hlRadius * 0.4, distance(center, u_hlCenter))
-    : 0.0;
-  v_hl = hlBase * (0.5 + 0.5 * u_hlPulse);
+    vec2 vCenter = vec2(pos2d) / pos2d.w;
+    gl_Position = vec4(
+        vCenter
+        + u_splatScale * position.x * majorAxis / viewport
+        + u_splatScale * position.y * minorAxis / viewport, 0.0, 1.0);
 }
 `;
 
 export const FRAGMENT_SHADER = /* glsl */ `#version 300 es
 precision highp float;
 
-in vec4 v_color;
-in vec2 v_offset;
-in float v_hl;
+in vec4 vColor;
+in vec2 vPosition;
+
 out vec4 fragColor;
 
-void main() {
-  float r2 = dot(v_offset, v_offset);
-  float alpha = exp(-0.5 * r2) * v_color.a;
-  if (alpha < 0.004) discard;
-  fragColor = vec4(v_color.rgb, alpha);
-  // Agent highlight: tint + glow (pulse already baked into v_hl from vertex shader)
-  if (v_hl > 0.0) {
-    vec3 hlTint = vec3(1.0, 0.85, 0.2);
-    fragColor.rgb = mix(fragColor.rgb, hlTint, 0.55 * v_hl);
-    fragColor.rgb += 0.25 * v_hl;
-  }
-  fragColor.rgb = clamp(fragColor.rgb, 0.0, 1.0);
+void main () {
+    float A = -dot(vPosition, vPosition);
+    if (A < -4.0) discard;
+    float B = exp(A) * vColor.a;
+    fragColor = vec4(B * vColor.rgb, B);
 }
 `;
-
-/** Texels per splat record in the data texture (RGBA32F). */
-export const RECORD_TEXELS = 4;

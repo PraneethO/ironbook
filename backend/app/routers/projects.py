@@ -1,6 +1,7 @@
 """Project CRUD + upload + reconstruct + asset endpoints (CONTRACT.md §2)."""
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -18,6 +19,7 @@ from ..models import (
     ValidationReport,
 )
 from ..reconstruction import splat_format
+from ..reconstruction.ply_to_splat import ply_to_splat
 from ..services import images as image_svc
 from ..services import jobs as job_svc
 from ..services import store
@@ -115,6 +117,67 @@ async def upload_splat(
     pid = record["id"]
     asset_path = store.project_dir(pid) / "asset.splat"
     asset_path.write_bytes(data)
+
+    record = store.load_project(pid) or record
+    record["status"] = "ready"
+    record["has_asset"] = True
+    record["photo_count"] = 0
+    store.save_project(record)
+    return _public(record)
+
+
+# --- Direct .ply upload (trained 3DGS, transcoded server-side) -------------
+
+
+@router.post("/upload_ply", response_model=Project, status_code=201)
+async def upload_ply(
+    file: UploadFile = File(...),
+    name: str = Form("Uploaded world"),
+) -> Project:
+    """Create a project from a trained 3DGS `.ply` (Inria/gsplat format).
+
+    The `.ply` is transcoded to the viewer's `.splat` on the server, so a user
+    can bring a reconstruction from any trainer and view + navigate it directly,
+    without going through photo reconstruction.
+    """
+    fname = file.filename or "scene.ply"
+    if Path(fname).suffix.lower() != ".ply":
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a .ply file (a trained Gaussian-splat scene).",
+        )
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="That .ply file looked empty.")
+
+    # Transcode in a temp dir first so a bad file never leaves an orphan project.
+    with tempfile.TemporaryDirectory() as td:
+        ply_path = Path(td) / "scene.ply"
+        splat_path = Path(td) / "scene.splat"
+        ply_path.write_bytes(data)
+        try:
+            ply_to_splat(ply_path, splat_path)
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "We couldn't read that .ply as a Gaussian-splat scene. Make sure "
+                    "it's a trained 3DGS .ply (with scale, rotation and color) — not a "
+                    "plain mesh or point cloud."
+                ),
+            )
+        splat_bytes = splat_path.read_bytes()
+
+    if not splat_bytes or len(splat_bytes) % splat_format.SPLAT_BYTES != 0:
+        raise HTTPException(
+            status_code=400,
+            detail="That .ply didn't contain any Gaussian splats we could read.",
+        )
+
+    record = store.create_project((name or "Uploaded world").strip() or "Uploaded world")
+    pid = record["id"]
+    asset_path = store.project_dir(pid) / "asset.splat"
+    asset_path.write_bytes(splat_bytes)
 
     record = store.load_project(pid) or record
     record["status"] = "ready"

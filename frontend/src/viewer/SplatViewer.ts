@@ -1,16 +1,23 @@
 /**
- * SplatViewer — WebGL2 Gaussian-splat renderer implementing CONTRACT.md §4.
+ * SplatViewer — WebGL2 Gaussian-splat renderer using antimatter15/splat's
+ * rendering + sorting approach, wired to our own camera controls.
  *
- * Rendering: instanced projected quads. Splat data (position, scale, color,
- * quaternion) is packed into an RGBA32F data texture; each drawn instance
- * reads a splat index from a per-instance integer attribute (`a_index`) that
- * is populated, back-to-front, from the depth-sort worker. The vertex shader
- * projects the splat's 3D covariance (scale + rotation) to a 2D screen-space
- * covariance and offsets the quad corners along its principal axes. Splats are
- * alpha-blended back-to-front for correct compositing.
+ * Pipeline:
+ *  - Splat data is packed (in a worker) into an RGBA32UI texture: position +
+ *    color and the 6 half-float entries of the 3D covariance (see
+ *    splatTexture.ts).
+ *  - Each frame we build the view/projection in the OpenCV convention the
+ *    antimatter shader expects (math.ts viewMatrixCV / projectionCV) from our
+ *    controls' eye/target, and draw one instanced [-2,2] quad per splat
+ *    (drawArraysInstanced TRIANGLE_FAN). The vertex shader projects the
+ *    covariance and stretches the quad along its screen-space axes (~2.83σ).
+ *  - Draw order comes from an O(n) 16-bit counting sort (sort.ts), run in the
+ *    worker and re-issued only when the view direction changes meaningfully.
+ *  - Fragments are premultiplied and composited with antimatter's blend for
+ *    correct, halo-free alpha.
  *
- * A synchronous sort fallback runs when Web Workers are unavailable so the
- * logic stays testable.
+ * The camera controls (orbit/walk/fly) are unchanged from the previous viewer.
+ * A synchronous fallback (no Worker) keeps the engine usable/testable.
  */
 
 import {
@@ -35,19 +42,25 @@ import {
   add,
   clamp,
   cross,
+  focalLengthPx,
+  length,
   lookAt,
   Mat4,
   multiply,
   normalize,
   perspective,
+  projectionCV,
   scale,
+  scale as vscale,
   sub,
   transformPoint4,
   Vec3,
+  viewMatrixCV,
 } from './math';
 import { parseSplat, ParsedSplats } from './SplatLoader';
-import { FRAGMENT_SHADER, RECORD_TEXELS, VERTEX_SHADER } from './shaders';
+import { FRAGMENT_SHADER, VERTEX_SHADER } from './shaders';
 import { sortByDepth } from './sort';
+import { generateSplatTexture } from './splatTexture';
 
 export type { CameraMode };
 
@@ -58,7 +71,8 @@ export interface SplatViewerOptions {
   onProgress?: (loaded: number, total: number) => void;
 }
 
-const QUAD_CUTOFF = 2.0;
+// Instanced quad corners in σ-ish units; the shader scales these by √(2λ).
+const QUAD = new Float32Array([-2, -2, 2, -2, 2, 2, -2, 2]);
 
 export class SplatViewer {
   private canvas: HTMLCanvasElement;
@@ -72,20 +86,21 @@ export class SplatViewer {
 
   private splats: ParsedSplats | null = null;
   private _splatCount = 0;
+  private sceneRadius = 1;
 
   private program: WebGLProgram | null = null;
   private vao: WebGLVertexArrayObject | null = null;
   private quadBuffer: WebGLBuffer | null = null;
   private indexBuffer: WebGLBuffer | null = null;
   private dataTexture: WebGLTexture | null = null;
-  private texWidth = 0;
+  private textureReady = false;
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
 
   private worker: Worker | null = null;
   private sortGeneration = 0;
   private order: Uint32Array | null = null;
   private orderDirty = false;
-  private lastSortKey = '';
+  private lastSortDir: [number, number, number] | null = null;
 
   private rafId = 0;
   private disposed = false;
@@ -111,14 +126,18 @@ export class SplatViewer {
     this.onFps = opts.onFps;
     this.onProgress = opts.onProgress;
 
+    // antimatter's premultiplied-alpha blend needs an alpha channel; the page
+    // shows through where splats are transparent, so we paint the background via
+    // CSS rather than the GL clear color.
     this.gl = this.canvas.getContext('webgl2', {
       antialias: false,
-      premultipliedAlpha: false,
-      alpha: false,
+      premultipliedAlpha: true,
+      alpha: true,
       preserveDrawingBuffer: true,
     });
 
     if (this.gl) this.initGL(this.gl);
+    this.applyBgToCanvas();
 
     this.controls = attachControls({
       canvas: this.canvas,
@@ -174,17 +193,22 @@ export class SplatViewer {
     const parsed = parseSplat(buf);
     this.splats = parsed;
     this._splatCount = parsed.count;
+    this.textureReady = false;
+    this.order = null;
+    this.lastSortDir = null;
 
     if (parsed.count > 0) {
       fitToBounds(this.state, parsed.bounds.min, parsed.bounds.max, DEFAULT_FOV);
+      this.sceneRadius = Math.max(
+        1e-3,
+        length(vscale(sub(parsed.bounds.max, parsed.bounds.min), 0.5)),
+      );
     }
 
-    if (this.gl && this.program) this.uploadSplats(this.gl, parsed);
-    this.initWorker(parsed);
+    this.initWorker(buf, parsed.count);
 
     await new Promise<void>((resolve) => {
       this.firstFrameResolvers.push(resolve);
-      // In headless/non-RAF environments resolve on next tick.
       if (typeof requestAnimationFrame === 'undefined') {
         this.renderOnce();
       }
@@ -509,6 +533,7 @@ export class SplatViewer {
 
   setBackgroundColor(r: number, g: number, b: number): void {
     this.bgColor = [r, g, b];
+    this.applyBgToCanvas();
   }
 
   dispose(): void {
@@ -533,23 +558,19 @@ export class SplatViewer {
   // -- GL setup ----------------------------------------------------------
 
   private initGL(gl: WebGL2RenderingContext) {
-    const ext = gl.getExtension('EXT_color_buffer_float');
-    void ext; // float textures: sampling requires the float texture itself
-    gl.getExtension('OES_texture_float_linear');
-
     const program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
     if (!program) return;
     this.program = program;
 
     this.uniforms = {
-      u_view: gl.getUniformLocation(program, 'u_view'),
-      u_proj: gl.getUniformLocation(program, 'u_proj'),
-      u_viewport: gl.getUniformLocation(program, 'u_viewport'),
+      projection: gl.getUniformLocation(program, 'projection'),
+      view: gl.getUniformLocation(program, 'view'),
+      focal: gl.getUniformLocation(program, 'focal'),
+      viewport: gl.getUniformLocation(program, 'viewport'),
+      u_texture: gl.getUniformLocation(program, 'u_texture'),
       u_splatScale: gl.getUniformLocation(program, 'u_splatScale'),
-      u_data: gl.getUniformLocation(program, 'u_data'),
-      u_texWidth: gl.getUniformLocation(program, 'u_texWidth'),
-      u_recordTexels: gl.getUniformLocation(program, 'u_recordTexels'),
-      // agent highlight
+      // agent highlight — null no-ops with the covariance shader; kept so the
+      // agent's highlightAt/clearHighlight bookkeeping has valid locations.
       u_hlCenter: gl.getUniformLocation(program, 'u_hlCenter'),
       u_hlRadius: gl.getUniformLocation(program, 'u_hlRadius'),
       u_hlPulse: gl.getUniformLocation(program, 'u_hlPulse'),
@@ -558,18 +579,16 @@ export class SplatViewer {
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
 
-    const c = QUAD_CUTOFF;
-    const quad = new Float32Array([-c, -c, c, -c, c, c, -c, -c, c, c, -c, c]);
     this.quadBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, QUAD, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
     this.indexBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.indexBuffer);
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 0, 0);
+    gl.vertexAttribIPointer(1, 1, gl.INT, 0, 0);
     gl.vertexAttribDivisor(1, 1);
 
     this.dataTexture = gl.createTexture();
@@ -578,53 +597,39 @@ export class SplatViewer {
 
     gl.disable(gl.DEPTH_TEST);
     gl.enable(gl.BLEND);
-    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.blendFuncSeparate(
+      gl.ONE_MINUS_DST_ALPHA,
+      gl.ONE,
+      gl.ONE_MINUS_DST_ALPHA,
+      gl.ONE,
+    );
+    gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
   }
 
-  /** Pack splat records into an RGBA32F texture (RECORD_TEXELS texels each). */
-  private uploadSplats(gl: WebGL2RenderingContext, parsed: ParsedSplats) {
+  private uploadTexture(
+    gl: WebGL2RenderingContext,
+    texdata: Uint32Array,
+    texwidth: number,
+    texheight: number,
+  ) {
     if (!this.dataTexture) return;
-    const count = parsed.count;
-    const totalTexels = Math.max(1, count * RECORD_TEXELS);
-    const width = Math.min(2048, Math.max(1, Math.ceil(Math.sqrt(totalTexels))));
-    const rows = Math.max(1, Math.ceil(totalTexels / width));
-    this.texWidth = width;
-
-    const data = new Float32Array(width * rows * 4);
-    for (let i = 0; i < count; i++) {
-      const o = i * RECORD_TEXELS * 4;
-      // t0: pos.xyz, scale.x
-      data[o + 0] = parsed.positions[i * 3 + 0];
-      data[o + 1] = parsed.positions[i * 3 + 1];
-      data[o + 2] = parsed.positions[i * 3 + 2];
-      data[o + 3] = parsed.scales[i * 3 + 0];
-      // t1: scale.y, scale.z, _, _
-      data[o + 4] = parsed.scales[i * 3 + 1];
-      data[o + 5] = parsed.scales[i * 3 + 2];
-      data[o + 6] = 0;
-      data[o + 7] = 0;
-      // t2: color rgba (0..1)
-      data[o + 8] = parsed.colors[i * 4 + 0] / 255;
-      data[o + 9] = parsed.colors[i * 4 + 1] / 255;
-      data[o + 10] = parsed.colors[i * 4 + 2] / 255;
-      data[o + 11] = parsed.colors[i * 4 + 3] / 255;
-      // t3: quat w,x,y,z
-      data[o + 12] = parsed.quats[i * 4 + 0];
-      data[o + 13] = parsed.quats[i * 4 + 1];
-      data[o + 14] = parsed.quats[i * 4 + 2];
-      data[o + 15] = parsed.quats[i * 4 + 3];
-    }
-
     gl.bindTexture(gl.TEXTURE_2D, this.dataTexture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, rows, 0, gl.RGBA, gl.FLOAT, data);
-
-    this.order = new Uint32Array(count);
-    for (let i = 0; i < count; i++) this.order[i] = i;
-    this.orderDirty = true;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA32UI,
+      texwidth,
+      texheight,
+      0,
+      gl.RGBA_INTEGER,
+      gl.UNSIGNED_INT,
+      texdata,
+    );
+    this.textureReady = true;
   }
 
   private uploadOrder(gl: WebGL2RenderingContext) {
@@ -634,51 +639,63 @@ export class SplatViewer {
     this.orderDirty = false;
   }
 
-  // -- sorting -----------------------------------------------------------
+  // -- worker / sorting --------------------------------------------------
 
-  private initWorker(parsed: ParsedSplats) {
+  private initWorker(buf: ArrayBuffer, count: number) {
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
     }
-    if (parsed.count === 0) return;
+    if (count === 0) return;
+
+    // Transfer a copy so we never detach the caller's buffer.
+    const workerBuf = buf.slice(0);
+
     try {
       if (typeof Worker === 'undefined') throw new Error('no worker');
       this.worker = new Worker(new URL('./sortWorker.ts', import.meta.url), { type: 'module' });
       this.worker.onmessage = (e: MessageEvent) => {
         const msg = e.data;
-        if (msg?.type === 'sorted' && msg.generation === this.sortGeneration) {
-          this.order = msg.order as Uint32Array;
+        if (msg?.type === 'texture') {
+          if (this.gl) this.uploadTexture(this.gl, msg.texdata, msg.texwidth, msg.texheight);
+        } else if (msg?.type === 'sorted' && msg.generation === this.sortGeneration) {
+          this.order = msg.depthIndex as Uint32Array;
           this.orderDirty = true;
         }
       };
-      const posCopy = parsed.positions.slice();
-      this.worker.postMessage(
-        { type: 'init', positions: posCopy.buffer, count: parsed.count },
-        [posCopy.buffer],
-      );
+      this.worker.postMessage({ type: 'init', buffer: workerBuf, count }, [workerBuf]);
     } catch {
+      // Synchronous fallback: build texture + initial order on the main thread.
       this.worker = null;
+      const tex = generateSplatTexture(workerBuf, count);
+      if (this.gl) this.uploadTexture(this.gl, tex.texdata, tex.texwidth, tex.texheight);
+      // positions for the fallback sort come straight from the parse.
     }
   }
 
-  private requestSort(viewMatrix: Mat4) {
+  private requestSort(viewProj: Mat4) {
     if (!this.splats || this.splats.count === 0) return;
-    const viewRow: [number, number, number, number] = [
-      viewMatrix[2],
-      viewMatrix[6],
-      viewMatrix[10],
-      viewMatrix[14],
-    ];
-    const key = viewRow.map((v) => v.toFixed(3)).join(',');
-    if (key === this.lastSortKey) return;
-    this.lastSortKey = key;
 
+    // Only re-sort when the view direction (viewProj row 2) changes enough;
+    // pure translation keeps the order stable (matches antimatter).
+    const dir = normalize3(viewProj[2], viewProj[6], viewProj[10]);
+    if (this.lastSortDir && this.order) {
+      const dot =
+        dir[0] * this.lastSortDir[0] +
+        dir[1] * this.lastSortDir[1] +
+        dir[2] * this.lastSortDir[2];
+      if (dot > 0.999) return;
+    }
+    this.lastSortDir = dir;
     this.sortGeneration++;
+
     if (this.worker) {
-      this.worker.postMessage({ type: 'sort', viewRow, generation: this.sortGeneration });
+      const vp = new Float32Array(viewProj);
+      this.worker.postMessage({ type: 'sort', viewProj: vp, generation: this.sortGeneration }, [
+        vp.buffer,
+      ]);
     } else {
-      this.order = sortByDepth(this.splats.positions, this.splats.count, viewRow);
+      this.order = sortByDepth(this.splats.positions, this.splats.count, viewProj);
       this.orderDirty = true;
     }
   }
@@ -716,33 +733,41 @@ export class SplatViewer {
 
     const w = this.canvas.width || 1;
     const h = this.canvas.height || 1;
-    const aspect = w / h;
 
     const eye = eyeForMode(this.state, this.mode);
     const target = targetForMode(this.state, this.mode);
-    const view = lookAt(eye, target, [0, 1, 0]);
-    const proj = perspective(DEFAULT_FOV, aspect, 0.01, 1000);
+    const near = Math.max(1e-3, this.sceneRadius * 0.01);
+    const far = this.sceneRadius * 1000 + 1000;
+    const view = viewMatrixCV(eye, target, [0, 1, 0]);
+    const proj = projectionCV(DEFAULT_FOV, w, h, near, far);
+    const viewProj = multiply(proj, view);
+    const focal = focalLengthPx(DEFAULT_FOV, h);
 
-    this.requestSort(view);
+    this.requestSort(viewProj);
     if (this.orderDirty) this.uploadOrder(gl);
 
     gl.viewport(0, 0, w, h);
-    gl.clearColor(this.bgColor[0], this.bgColor[1], this.bgColor[2], 1);
+    gl.clearColor(0, 0, 0, 0); // transparent; CSS supplies the background
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    if (this.splats && this.splats.count > 0 && this.vao && this.order) {
+    if (
+      this.splats &&
+      this.splats.count > 0 &&
+      this.vao &&
+      this.order &&
+      this.textureReady
+    ) {
       gl.useProgram(this.program);
       gl.bindVertexArray(this.vao);
 
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.dataTexture);
-      gl.uniform1i(this.uniforms.u_data, 0);
-      gl.uniform1i(this.uniforms.u_texWidth, this.texWidth);
-      gl.uniform1i(this.uniforms.u_recordTexels, RECORD_TEXELS);
+      gl.uniform1i(this.uniforms.u_texture, 0);
 
-      gl.uniformMatrix4fv(this.uniforms.u_view, false, view);
-      gl.uniformMatrix4fv(this.uniforms.u_proj, false, proj);
-      gl.uniform2f(this.uniforms.u_viewport, w, h);
+      gl.uniformMatrix4fv(this.uniforms.projection, false, proj);
+      gl.uniformMatrix4fv(this.uniforms.view, false, view);
+      gl.uniform2f(this.uniforms.focal, focal, focal);
+      gl.uniform2f(this.uniforms.viewport, w, h);
       gl.uniform1f(this.uniforms.u_splatScale, this.splatScale);
 
       const hc = this.hlCenter ?? [0, 0, 0];
@@ -750,11 +775,18 @@ export class SplatViewer {
       gl.uniform1f(this.uniforms.u_hlRadius, this.hlRadius);
       gl.uniform1f(this.uniforms.u_hlPulse, 0.5 + 0.5 * Math.sin(t * 0.004));
 
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.splats.count);
+      gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, this.splats.count);
       gl.bindVertexArray(null);
     }
 
     this.resolveFirstFrame();
+  }
+
+  private applyBgToCanvas() {
+    if (!this.canvas.style) return; // minimal/headless canvas (tests) — nothing to paint
+    const [r, g, b] = this.bgColor;
+    const to255 = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255);
+    this.canvas.style.backgroundColor = `rgb(${to255(r)}, ${to255(g)}, ${to255(b)})`;
   }
 
   private resolveFirstFrame() {
@@ -776,6 +808,11 @@ export class SplatViewer {
       this.canvas.height = targetH;
     }
   }
+}
+
+function normalize3(x: number, y: number, z: number): [number, number, number] {
+  const l = Math.hypot(x, y, z) || 1;
+  return [x / l, y / l, z / l];
 }
 
 function now(): number {

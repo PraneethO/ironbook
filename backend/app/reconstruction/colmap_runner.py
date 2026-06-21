@@ -30,9 +30,11 @@ _RE_REGISTER = re.compile(r"num_reg_frames=(\d+)")
 # Allow override; default to the Homebrew location / PATH lookup.
 COLMAP_BIN = os.environ.get("COLMAP_BIN") or shutil.which("colmap") or "/opt/homebrew/bin/colmap"
 
-# GPU SIFT works headless on Apple Silicon (verified) and is much faster than
-# CPU. "1" by default; set COLMAP_USE_GPU=0 to force CPU.
-_USE_GPU = "0" if os.environ.get("COLMAP_USE_GPU") == "0" else "1"
+# GPU SIFT needs a CUDA-enabled COLMAP build (or, on Apple Silicon, a Metal/
+# display context). Many server COLMAP builds are "without CUDA" and run
+# headless, where GPU SIFT aborts (SIGABRT) — so default to CPU for robustness
+# and make GPU opt-in via COLMAP_USE_GPU=1.
+_USE_GPU = "1" if os.environ.get("COLMAP_USE_GPU") == "1" else "0"
 # Cap feature-extraction resolution to keep it fast (images are already ≤1600).
 _MAX_IMAGE_SIZE = os.environ.get("COLMAP_MAX_IMAGE_SIZE", "1600")
 # Above this many photos, exhaustive matching (O(n²)) gets painful, so use
@@ -125,8 +127,8 @@ def run_colmap(
         # SIMPLE_RADIAL is COLMAP's default and is supported by the 3DGS
         # trainer's loader (OPENCV's extra distortion params are not).
         "--ImageReader.camera_model", "SIMPLE_RADIAL",
-        "--FeatureExtraction.max_image_size", _MAX_IMAGE_SIZE,
-        "--FeatureExtraction.use_gpu", _USE_GPU,
+        "--SiftExtraction.max_image_size", _MAX_IMAGE_SIZE,
+        "--SiftExtraction.use_gpu", _USE_GPU,
     ], log_path, on_line=_fe_line)
 
     # 2) Matching. Sequential (O(n)) for large ordered sets, else exhaustive.
@@ -146,7 +148,7 @@ def run_colmap(
     _run([
         COLMAP_BIN, matcher_cmd,
         "--database_path", str(db_path),
-        "--FeatureMatching.use_gpu", _USE_GPU,
+        "--SiftMatching.use_gpu", _USE_GPU,
     ], log_path, on_line=_match_line)
     emit(1.0, "Matched the photos", "pose_estimation")
 

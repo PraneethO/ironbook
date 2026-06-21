@@ -143,6 +143,18 @@ export const apiClient = {
     });
   },
 
+  // POST /api/projects/upload_ply — bring-your-own trained 3DGS .ply (transcoded server-side)
+  uploadPly(file: File, name: string): Promise<Project> {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    form.append('name', name);
+    // Do NOT set Content-Type manually; the browser sets multipart/form-data + boundary.
+    return jsonRequest<Project>('/projects/upload_ply', {
+      method: 'POST',
+      body: form,
+    });
+  },
+
   // GET /api/agent/voice-config — Deepgram key served from backend (never in bundle)
   voiceConfig(): Promise<{ deepgram_key: string; model: string }> {
     return jsonRequest<{ deepgram_key: string; model: string }>('/agent/voice-config');

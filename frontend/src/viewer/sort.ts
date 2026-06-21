@@ -1,49 +1,65 @@
 /**
- * sort.ts — pure depth-sort logic shared by the main thread (synchronous
- * fallback) and the Web Worker. Splats must be drawn back-to-front for correct
- * alpha blending, so we sort indices by view-space depth (farthest first).
+ * sort.ts — fast back-to-front depth ordering for correct alpha compositing,
+ * ported from antimatter15/splat.
  *
- * To compute depth we only need the view matrix's third row (the part that
- * projects a world point onto the view -Z axis). We pass that row plus the
- * positions, keeping the function allocation-light and testable.
+ * A 16-bit single-pass counting sort (O(n)) replaces the old O(n·log n)
+ * comparison sort, whose per-comparison JS callback dominated frame time and
+ * made large scenes stutter. Depth is the view-projected Z of each splat
+ * center, so we only need row 2 of the column-major viewProj matrix
+ * (indices 2, 6, 10). The resulting index order is the draw order the renderer
+ * (premultiplied-alpha blend) expects.
+ *
+ * Shared by the Web Worker and the synchronous fallback so the logic is
+ * identical and unit-testable.
  */
 
+const BUCKETS = 256 * 256;
+
 /**
- * Sort splat indices back-to-front (farthest first) given positions and the
- * view matrix's depth row. `viewRow` = [m2, m6, m10, m14] from a column-major
- * view matrix; depth = -(m2*x + m6*y + m10*z + m14).
- *
- * Returns a Uint32Array of indices ordered farthest -> nearest.
+ * Return splat indices ordered by view-projected depth (the antimatter draw
+ * order). `viewProj` is the flattened column-major projection·view matrix;
+ * only indices [2], [6], [10] are read. Pass `out` to reuse a buffer.
  */
 export function sortByDepth(
   positions: Float32Array,
   count: number,
-  viewRow: [number, number, number, number],
+  viewProj: ArrayLike<number>,
   out?: Uint32Array,
 ): Uint32Array {
-  const indices = out && out.length >= count ? out : new Uint32Array(count);
-  const depths = new Float32Array(count);
+  const depthIndex = out && out.length >= count ? out : new Uint32Array(count);
+  if (count === 0) return depthIndex;
 
-  const [m2, m6, m10, m14] = viewRow;
+  const vp2 = viewProj[2];
+  const vp6 = viewProj[6];
+  const vp10 = viewProj[10];
+
+  // Quantize each depth to an integer and track the range.
+  const sizeList = new Int32Array(count);
+  let maxDepth = -Infinity;
+  let minDepth = Infinity;
   for (let i = 0; i < count; i++) {
-    const x = positions[i * 3 + 0];
-    const y = positions[i * 3 + 1];
-    const z = positions[i * 3 + 2];
-    // farther points have more negative view-z; we store -z so larger = farther
-    depths[i] = -(m2 * x + m6 * y + m10 * z + m14);
-    indices[i] = i;
+    const depth =
+      ((vp2 * positions[i * 3 + 0] +
+        vp6 * positions[i * 3 + 1] +
+        vp10 * positions[i * 3 + 2]) *
+        4096) |
+      0;
+    sizeList[i] = depth;
+    if (depth > maxDepth) maxDepth = depth;
+    if (depth < minDepth) minDepth = depth;
   }
 
-  // Sort farthest first (descending depth) for back-to-front blending.
-  const view = indices.subarray(0, count);
-  // Array.prototype.sort on a typed array subarray view.
-  Array.prototype.sort.call(view, (a: number, b: number) => depths[b] - depths[a]);
+  // 16-bit single-pass counting sort over the quantized depth range.
+  const depthInv = (BUCKETS - 1) / (maxDepth - minDepth || 1);
+  const counts = new Uint32Array(BUCKETS);
+  for (let i = 0; i < count; i++) {
+    const bucket = ((sizeList[i] - minDepth) * depthInv) | 0;
+    sizeList[i] = bucket;
+    counts[bucket]++;
+  }
+  const starts = new Uint32Array(BUCKETS);
+  for (let i = 1; i < BUCKETS; i++) starts[i] = starts[i - 1] + counts[i - 1];
+  for (let i = 0; i < count; i++) depthIndex[starts[sizeList[i]]++] = i;
 
-  return indices;
-}
-
-export interface SortRequest {
-  positions: Float32Array;
-  count: number;
-  viewRow: [number, number, number, number];
+  return depthIndex;
 }

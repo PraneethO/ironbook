@@ -12,8 +12,26 @@ import {
   syncStateForMode,
   targetForMode,
 } from '../src/viewer/controls';
-import { lookAt, perspective, viewDepth } from '../src/viewer/math';
+import {
+  lookAt,
+  Mat4,
+  perspective,
+  projectionCV,
+  Vec3,
+  viewDepth,
+  viewMatrixCV,
+} from '../src/viewer/math';
 import { sortByDepth } from '../src/viewer/sort';
+
+/** Column-major mat4 * vec4(p, 1) -> [x, y, z, w] (no perspective divide). */
+function mulMatVec(m: Mat4, p: Vec3): [number, number, number, number] {
+  return [
+    m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+    m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+    m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15],
+  ];
+}
 
 describe('camera math (pure)', () => {
   it('forwardFromAngles points toward -Z at yaw=0, pitch=0', () => {
@@ -102,26 +120,66 @@ describe('matrices', () => {
   });
 });
 
-describe('sortByDepth', () => {
-  it('orders indices farthest-first for back-to-front blending', () => {
-    // three splats along Z; camera at +5 looking toward -Z
+describe('viewMatrixCV / projectionCV (antimatter OpenCV convention)', () => {
+  // Camera at +5 on Z looking at the origin, world-up = +Y.
+  const eye: Vec3 = [0, 0, 5];
+  const target: Vec3 = [0, 0, 0];
+  const up: Vec3 = [0, 1, 0];
+  const view = viewMatrixCV(eye, target, up);
+  const proj = projectionCV((60 * Math.PI) / 180, 800, 600, 0.1, 1000);
+
+  it('puts points in front of the camera at positive view-z (cam.z > 0)', () => {
+    const cam = mulMatVec(view, [0, 0, 0]); // scene center, in front
+    expect(cam[2]).toBeGreaterThan(0);
+    const behind = mulMatVec(view, [0, 0, 10]); // behind the camera
+    expect(behind[2]).toBeLessThan(0);
+  });
+
+  it('projects in-front points with positive clip.w', () => {
+    const cam = mulMatVec(view, [0, 0, 0]);
+    const clip = mulMatVec(proj, [cam[0], cam[1], cam[2]]);
+    expect(clip[3]).toBeGreaterThan(0);
+  });
+
+  it('maps world-up to the top and world-right to the right of the screen', () => {
+    const project = (p: Vec3) => {
+      const cam = mulMatVec(view, p);
+      const clip = mulMatVec(proj, [cam[0], cam[1], cam[2]]);
+      return { x: clip[0] / clip[3], y: clip[1] / clip[3] }; // NDC
+    };
+    expect(project([0, 1, 0]).y).toBeGreaterThan(0); // above center -> top
+    expect(project([0, -1, 0]).y).toBeLessThan(0); // below center -> bottom
+    expect(project([1, 0, 0]).x).toBeGreaterThan(0); // right -> +x
+    expect(project([-1, 0, 0]).x).toBeLessThan(0); // left -> -x
+  });
+});
+
+describe('sortByDepth (counting sort)', () => {
+  it('orders indices by view-projected depth (viewProj row 2)', () => {
+    // depth = viewProj[2]*x + viewProj[6]*y + viewProj[10]*z; here depth = z.
     const positions = new Float32Array([
-      0, 0, 0, // mid
-      0, 0, -5, // far
-      0, 0, 4, // near (behind nothing, closest to camera)
+      0, 0, 0, // idx 0: depth 0
+      0, 0, -5, // idx 1: depth -5 (smallest)
+      0, 0, 4, // idx 2: depth 4 (largest)
     ]);
-    const view = lookAt([0, 0, 5], [0, 0, 0], [0, 1, 0]);
-    const viewRow: [number, number, number, number] = [view[2], view[6], view[10], view[14]];
-    const order = sortByDepth(positions, 3, viewRow);
-    // farthest first => the z=-5 splat (index 1) should come before z=4 (index 2)
-    expect(order[0]).toBe(1);
-    expect(order[2]).toBe(2);
+    const viewProj = new Float32Array(16);
+    viewProj[10] = 1; // only the z term contributes
+    const order = sortByDepth(positions, 3, viewProj);
+    // counting sort is ascending by quantized depth: -5, 0, 4
+    expect(Array.from(order)).toEqual([1, 0, 2]);
   });
 
   it('reuses the provided output buffer when large enough', () => {
     const positions = new Float32Array([0, 0, 0, 0, 0, 1]);
+    const viewProj = new Float32Array(16);
+    viewProj[10] = 1;
     const out = new Uint32Array(2);
-    const res = sortByDepth(positions, 2, [0, 0, 1, 0], out);
+    const res = sortByDepth(positions, 2, viewProj, out);
     expect(res).toBe(out);
+  });
+
+  it('handles an empty splat set', () => {
+    const order = sortByDepth(new Float32Array(0), 0, new Float32Array(16));
+    expect(order.length).toBe(0);
   });
 });
