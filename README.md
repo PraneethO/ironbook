@@ -1,89 +1,191 @@
-# Gaussian Splat World
+# Ironbook
 
-Upload photos of a real place → get an interactive 3D world you can walk through, in your
-browser. This is the MVP described in `../gaussian_splat_world_docs/` (Phase 1:
-Reconstruction Viewer).
+> Preserve the knowledge of every expert on your shop floor — before they walk out the door.
 
-- **`backend/`** — FastAPI service: project management, photo/video upload + validation &
-  coverage scoring, a staged reconstruction job queue, and a pluggable reconstruction engine
-  that emits a real `.splat` asset.
-- **`frontend/`** — React + Vite app (Dashboard, Upload, Capture Guide, Processing, 3D Viewer,
-  Scene Settings, Export/Share) with a from-scratch **WebGL2 Gaussian-splat viewer** (orbit /
-  walk / fly modes, WASD + mouse).
-- **`CONTRACT.md`** — the binding API + `.splat` format + viewer-interface contract.
-- **`DECISIONS.md`** — how the open questions in the spec were resolved for this MVP.
+---
 
-## What's real vs. simulated
-Everything in the product surface is real and runnable: project mgmt, upload + validation,
-staged progress with friendly logs, real `.splat` generation, a real WebGL splat renderer,
-export/screenshot/share, and full test suites.
+## The Problem: The Silver Tsunami
 
-**Reconstruction is real 3D Gaussian Splatting, trained fully on the Apple GPU.** On this M5 Max
-the default backend (`msplat`) runs the genuine pipeline:
+The manufacturing industry is facing a knowledge crisis. An entire generation of skilled machinists, technicians, and engineers — people who know exactly why a machine sounds different when a bearing is failing, or which tooling setup works for a specific aluminum alloy — are retiring. That institutional knowledge has historically lived in people's heads, passed down through years of hands-on mentorship. As these experts leave, so does the knowledge.
 
-1. **COLMAP** (Homebrew, CPU) recovers camera poses + a sparse point cloud from your photos.
-2. **msplat** — a fused-Metal trainer (projection, sort, rasterize, SSIM, backward, Adam, and
-   densify all run as Metal compute kernels with no per-iteration CPU round-trip) optimizes real
-   3D Gaussians **on the GPU**.
-3. msplat writes the viewer's 32-byte `.splat` directly (byte-verified compatible — no convert).
+Younger manufacturers joining the workforce don't have decades to apprentice. They need a faster way to learn the equipment, understand the machines, and ask questions about the physical world around them.
 
-Measured on this machine: truck scene → **~24 dB PSNR in ~41 s** (7000 iters, ~169 it/s) at
-**~98% GPU / ~9% CPU**; the full upload→COLMAP→train→`.splat`→HTTP flow runs end-to-end.
-`/api/health` reports the active backend and the UI explains it.
+**Ironbook bridges that gap.**
 
-Fallbacks (best-available wins): if msplat isn't built → the MLX 3DGS trainer (`gaussian_3dgs`,
-same algorithm but CPU-bottlenecked, ~20 min); if no trainer, or if COLMAP can't solve poses for
-a given set → on-device **depth 2.5D** so you still get something navigable.
+---
 
-### Setup for the GPU 3DGS path
-- **COLMAP:** `brew install colmap`
-- **Metal toolchain** (needed to build msplat's shaders): `sudo xcodebuild -runFirstLaunch` then
-  `xcodebuild -downloadComponent MetalToolchain` (already done on this machine).
-- **msplat** lives under `_splat_research/msplat` (built binary at `build/msplat`). Env knobs:
-  `MSPLAT_DIR`, `MSPLAT_BIN`, `MSPLAT_ITERS` (default 7000), `MSPLAT_DOWNSCALES`. The MLX
-  fallback trainer's knobs (`SPLAT_RESEARCH_DIR`, `SPLAT_TRAIN_ITERS`, …) are in `DECISIONS.md`.
-  Capture tip: 20+ overlapping photos taken while walking around the subject — SfM needs real
-  parallax, so a few scattered shots won't solve.
-- **Depth fallback model (one-time, ~94 MB):**
-  ```bash
-  mkdir -p backend/models
-  curl -L "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx" \
-    -o backend/models/depth_anything_v2_small.onnx
-  ```
+## The Solution
 
-## Run it
+Take your phone, walk around a machine, a part, or a workstation, and photograph it from multiple angles. Ironbook reconstructs a photorealistic 3D scene — a **Gaussian splat** — and pairs it with an AI agent that can *navigate that scene in real time*.
 
-**Backend** (terminal 1):
+Instead of a static photo or a flat manual, a new technician can:
+
+- **Ask natural questions** — *"What's that valve on the left side?"* or *"Show me the oil fill port."*
+- **Let the agent navigate** — the AI physically moves the camera through the 3D scene, flies to the object, and highlights it on screen
+- **Speak instead of type** — voice input lets technicians keep their hands free
+- **Build a living library** — every scanned asset becomes a searchable, queryable record of institutional knowledge
+
+---
+
+## How It Works
+
+### 1. Capture
+Upload 20+ overlapping photos of any physical object or space. The more parallax between shots, the better the reconstruction. The app guides you through coverage.
+
+### 2. Reconstruct
+Ironbook runs a real **3D Gaussian Splatting** pipeline on your machine:
+
+1. **COLMAP** recovers precise camera poses and a sparse point cloud from your photos using structure-from-motion
+2. **msplat** — a Metal-accelerated trainer — optimizes tens of thousands of 3D Gaussians on your Apple GPU (~24 dB PSNR in ~41 seconds on M-series chips)
+3. The output is a `.splat` asset streamed directly to the browser
+
+If GPU training isn't available, the system falls back to an MLX-based CPU trainer, then to a depth-based 2.5D reconstruction — you always get something navigable.
+
+### 3. Query
+An AI agent backed by **Claude** (vision + structured output) receives the user's message, the current camera frame as a screenshot, and the camera state. It reasons about the scene and returns:
+
+- A natural-language **answer** to the user's question
+- A sequence of **camera actions** the frontend executes: `fly_to`, `look_at`, `highlight`, `rotate`, `zoom`, `move`, `reset_view`, and more
+
+The agent is connected to the viewer via an **MCP-style action protocol** — it doesn't just describe what to do, it *does it*, maneuvering through the 3D scene to answer questions spatially.
+
+### 4. Explore
+A WebGL2 Gaussian splat renderer built from scratch supports **orbit, walk, and fly modes** with WASD + mouse. The viewer executes agent actions in real time as the conversation unfolds.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                     Browser                         │
+│                                                     │
+│  ┌──────────────┐   actions   ┌──────────────────┐  │
+│  │  AgentChat   │ ──────────► │  WebGL2 Splat    │  │
+│  │  (voice/text)│ ◄────────── │  Viewer          │  │
+│  └──────┬───────┘  screenshot └──────────────────┘  │
+│         │                                           │
+└─────────┼───────────────────────────────────────────┘
+          │ POST /api/agent/act
+          ▼
+┌─────────────────────────────────────────────────────┐
+│                  FastAPI Backend                     │
+│                                                     │
+│  agent/act ──► agent_llm.run_agent()               │
+│                    │                               │
+│                    ▼                               │
+│             Claude (vision + structured output)    │
+│             returns {answer, actions[]}            │
+│                                                     │
+│  projects/ ──► COLMAP → msplat → .splat            │
+└─────────────────────────────────────────────────────┘
+```
+
+**Stack:**
+- **Frontend:** React + Vite, custom WebGL2 Gaussian splat renderer, voice input via Deepgram
+- **Backend:** FastAPI, COLMAP, msplat (Metal), MLX 3DGS fallback, depth-anything fallback
+- **Agent:** Claude (claude-3-5-sonnet), structured JSON output schema, multi-turn history, screenshot-grounded reasoning
+- **Observability:** Sentry (transactions, errors, Anthropic integration), Langfuse (LLM traces, token usage)
+
+---
+
+## Quick Start
+
+**Prerequisites:** Python 3.11+, Node 18+, `brew install colmap` (optional, for real reconstruction)
+
+**Backend:**
 ```bash
 cd backend
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
+
+# Create backend/.env with at minimum:
+# ANTHROPIC_API_KEY=sk-ant-...
+# (see backend/.env.example for all options)
+
 ./.venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
-**Frontend** (terminal 2):
+**Frontend:**
 ```bash
 cd frontend
 npm install
-npm run dev        # http://localhost:5173  (proxies /api → :8000)
+npm run dev        # → http://localhost:5173
 ```
 
-Open http://localhost:5173 → "New 3D World" → add 8+ photos → "Create my world" → watch the
-friendly stages → explore the result. Use the share link or export the `.splat`.
+Open `http://localhost:5173`, click **New Project**, upload 8+ photos of any object, and hit **Reconstruct**. Once processing completes, open the 3D viewer and start asking questions.
 
-## Test
+### GPU reconstruction (Apple Silicon)
+
+For the full msplat pipeline (~41 s on M5 Max vs ~20 min on CPU):
+
 ```bash
-cd backend  && ./.venv/bin/python -m pytest -q     # 27 passed
-cd frontend && npm test                            # 50 passed
-cd frontend && npm run build                        # type-check + production build
+# Metal toolchain (one-time)
+sudo xcodebuild -runFirstLaunch
+xcodebuild -downloadComponent MetalToolchain
+
+# Depth fallback model (~94 MB, one-time)
+mkdir -p backend/models
+curl -L "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx" \
+  -o backend/models/depth_anything_v2_small.onnx
 ```
 
-## Verified end-to-end
-Create project → upload 12 photos (validation + coverage warnings) → reconstruct through all 6
-stages → real 41,000-splat asset served → frontend `SplatLoader` decodes the live asset
-byte-for-byte → Vite proxy wiring → persistence across backend restart → friendly 400/404
-error paths. The only thing not verifiable headlessly is the on-GPU pixel render, which needs a
-real browser/GPU (the renderer logic itself is unit-tested).
-# ironbook
-# ironbook
-# ironbook
+Set `MSPLAT_DIR` in `backend/.env` to point at your msplat build. `GET /api/health` reports the active backend.
+
+### Demo scene
+
+No photos handy? Click **Try Demo** on the home screen to load a prebuilt bike scene and start querying immediately.
+
+---
+
+## Configuration
+
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | Required for agent queries |
+| `DEEPGRAM_API_KEY` | Required for voice input |
+| `SENTRY_DSN` | Error tracking + performance monitoring |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | LLM trace logging |
+| `MSPLAT_DIR` | Path to msplat build (enables GPU 3DGS) |
+| `MSPLAT_ITERS` | Training iterations (default: 7000) |
+| `AGENT_MODEL` | Claude model to use (default: claude-3-5-sonnet-20241022) |
+
+---
+
+## Testing
+
+```bash
+# Backend (27 tests)
+cd backend && ./.venv/bin/python -m pytest -q
+
+# Frontend (50 tests)
+cd frontend && npm test
+
+# Type-check + production build
+cd frontend && npm run build
+
+# Sentry smoke test (fires ~100 real API calls)
+python sentry_smoke_test.py
+```
+
+---
+
+## Capture Tips
+
+Good 3D reconstruction depends on good photos:
+
+- **20+ overlapping shots** — walk a full circle around the subject
+- **Real parallax** — move your camera position between shots, not just your phone angle
+- **Even lighting** — avoid hard shadows or blown highlights
+- **No motion blur** — tap to focus before each shot
+- The app shows a **coverage score** as you upload and warns you if gaps exist
+
+---
+
+## Roadmap
+
+- [ ] Multi-user shared scene libraries (team knowledge base)
+- [ ] Video upload → automatic frame extraction
+- [ ] Semantic search across scanned assets
+- [ ] On-device reconstruction for field use (no cloud required)
+- [ ] Export to standard formats (`.ply`, GLTF)
