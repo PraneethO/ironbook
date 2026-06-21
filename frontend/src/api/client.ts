@@ -8,7 +8,10 @@
  */
 
 import type {
+  AgentActResponse,
+  AgentTurn,
   AssetInfo,
+  CameraSnapshot,
   Health,
   Job,
   Project,
@@ -126,6 +129,32 @@ export const apiClient = {
   // GET /api/projects/{id}/share
   share(id: string): Promise<ShareLink> {
     return jsonRequest<ShareLink>(`/projects/${id}/share`);
+  },
+
+  // POST /api/projects/upload_splat — bring-your-own .splat file
+  uploadSplat(file: File, name: string): Promise<Project> {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    form.append('name', name);
+    // Do NOT set Content-Type manually; the browser sets multipart/form-data + boundary.
+    return jsonRequest<Project>('/projects/upload_splat', {
+      method: 'POST',
+      body: form,
+    });
+  },
+
+  // POST /api/agent/act — reasoning navigation agent
+  agentAct(body: {
+    message: string;
+    screenshot_b64?: string;
+    camera: CameraSnapshot;
+    history: AgentTurn[];
+  }): Promise<AgentActResponse> {
+    return jsonRequest<AgentActResponse>('/agent/act', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   },
 };
 

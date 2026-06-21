@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import config
-from .routers import health, projects
+from .routers import agent, health, projects
 from .services import store
 
 app = FastAPI(title="Gaussian Splat World API", version="1.0.0")
@@ -25,6 +25,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(projects.router)
+app.include_router(agent.router)
 
 
 @app.on_event("startup")

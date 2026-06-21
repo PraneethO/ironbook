@@ -14,6 +14,9 @@
  */
 
 import {
+  applyLook,
+  applyMove,
+  applyZoom,
   attachControls,
   CameraMode,
   CameraState,
@@ -21,10 +24,26 @@ import {
   DEFAULT_FOV,
   eyeForMode,
   fitToBounds,
+  forwardFromAngles,
+  MAX_PITCH,
+  MIN_DISTANCE,
+  MIN_PITCH,
   syncStateForMode,
   targetForMode,
 } from './controls';
-import { lookAt, Mat4, perspective } from './math';
+import {
+  add,
+  clamp,
+  lookAt,
+  Mat4,
+  multiply,
+  normalize,
+  perspective,
+  scale,
+  sub,
+  transformPoint4,
+  Vec3,
+} from './math';
 import { parseSplat, ParsedSplats } from './SplatLoader';
 import { FRAGMENT_SHADER, RECORD_TEXELS, VERTEX_SHADER } from './shaders';
 import { sortByDepth } from './sort';
@@ -71,6 +90,13 @@ export class SplatViewer {
   private disposed = false;
   private splatScale = 1.0;
   private bgColor: [number, number, number] = [0.04, 0.05, 0.07];
+
+  // --- agent-driven camera animation + highlight ---
+  private anim: { from: CameraState; to: CameraState; t: number; dur: number } | null = null;
+  private hlCenter: Vec3 | null = null;
+  private hlRadius = 0;
+  private static readonly MOVE_STEP = 0.8; // move = amount * sceneDist * STEP
+  private static readonly ROT_STEP = Math.PI / 6; // amount 1.0 == 30 degrees
 
   private frameCount = 0;
   private lastFpsTs = 0;
@@ -182,6 +208,224 @@ export class SplatViewer {
     }
   }
 
+  // -- agent-facing imperative API --------------------------------------
+  // All motion reuses the pure camera math in controls.ts and scales to the
+  // scene via state.distance, so it feels right on any loaded .splat.
+
+  private sceneDist(): number {
+    return Math.max(0.5, this.state.distance);
+  }
+
+  /** Step the camera; orbit nudges behave like a free 'fly' move. */
+  moveRelative(
+    dir: 'forward' | 'backward' | 'left' | 'right' | 'up' | 'down',
+    amount = 1,
+  ): void {
+    const d = clampAmount(amount) * this.sceneDist() * SplatViewer.MOVE_STEP;
+    const map: Record<string, Vec3> = {
+      forward: [0, 0, d],
+      backward: [0, 0, -d],
+      left: [-d, 0, 0],
+      right: [d, 0, 0],
+      up: [0, d, 0],
+      down: [0, -d, 0],
+    };
+    const mode: CameraMode = this.mode === 'orbit' ? 'fly' : this.mode;
+    applyMove(this.state, mode, map[dir]);
+    if (this.mode === 'orbit') {
+      // keep the orbit target in front so subsequent orbit math stays sane
+      const fwd = forwardFromAngles(this.state.yaw, this.state.pitch);
+      this.state.target = add(this.state.position, scale(fwd, this.state.distance));
+    }
+    this.anim = null;
+  }
+
+  /** Yaw the view. clockwise = +yaw. amount 1.0 == 30 degrees. */
+  rotateView(dir: 'clockwise' | 'counterclockwise', amount = 1): void {
+    const dy = (dir === 'clockwise' ? 1 : -1) * clampAmount(amount) * SplatViewer.ROT_STEP;
+    applyLook(this.state, dy, 0);
+    this.anim = null;
+  }
+
+  /** Dolly / zoom. in = closer. */
+  zoomView(dir: 'in' | 'out', amount = 1): void {
+    const a = (dir === 'in' ? 1 : -1) * clampAmount(amount) * 0.6;
+    if (this.mode === 'orbit') applyZoom(this.state, this.mode, a);
+    else applyZoom(this.state, this.mode, a * this.sceneDist());
+    this.anim = null;
+  }
+
+  /** Smoothly turn toward + approach a 3D point so it's centered and framed. */
+  flyTo(point: Vec3, standoff?: number): void {
+    const eye = eyeForMode(this.state, this.mode);
+    const dir = normalize(sub(point, eye));
+    const yaw = Math.atan2(dir[0], -dir[2]);
+    const pitch = clamp(Math.asin(clamp(dir[1], -1, 1)), MIN_PITCH, MAX_PITCH);
+    const fwd = forwardFromAngles(yaw, pitch);
+    const so = Math.max(MIN_DISTANCE, standoff ?? this.sceneDist() * 0.55);
+    const to = cloneState(this.state);
+    to.yaw = yaw;
+    to.pitch = pitch;
+    to.target = point;
+    to.distance = so;
+    to.position = sub(point, scale(fwd, so)); // authoritative eye for walk/fly
+    this.startAnim(to, 700);
+  }
+
+  /** Smoothly turn to face a 3D point without travelling. */
+  lookAtPoint(point: Vec3): void {
+    const eye = eyeForMode(this.state, this.mode);
+    const dir = normalize(sub(point, eye));
+    const yaw = Math.atan2(dir[0], -dir[2]);
+    const pitch = clamp(Math.asin(clamp(dir[1], -1, 1)), MIN_PITCH, MAX_PITCH);
+    const fwd = forwardFromAngles(yaw, pitch);
+    const to = cloneState(this.state);
+    to.yaw = yaw;
+    to.pitch = pitch;
+    to.position = eye; // keep eye fixed
+    to.distance = this.state.distance;
+    to.target = add(eye, scale(fwd, this.state.distance));
+    this.startAnim(to, 450);
+  }
+
+  /** Camera + scene info sent to the agent backend each turn. */
+  getCameraSnapshot(): {
+    mode: CameraMode;
+    fov: number;
+    eye: Vec3;
+    target: Vec3;
+    bounds: { min: Vec3; max: Vec3 };
+  } {
+    const b = this.splats
+      ? this.splats.bounds
+      : { min: [0, 0, 0] as Vec3, max: [0, 0, 0] as Vec3 };
+    return {
+      mode: this.mode,
+      fov: DEFAULT_FOV,
+      eye: eyeForMode(this.state, this.mode),
+      target: targetForMode(this.state, this.mode),
+      bounds: { min: b.min as Vec3, max: b.max as Vec3 },
+    };
+  }
+
+  /**
+   * Convert a normalized screen point (nx, ny in [0,1], top-left origin — the
+   * same frame as capture()/the agent's screenshot) to a 3D scene point by
+   * projecting splats and choosing the frontmost one near that pixel, then
+   * returning the local median for stability. Returns null if nothing is there.
+   */
+  pickAt(nx: number, ny: number): Vec3 | null {
+    const s = this.splats;
+    if (!s || s.count === 0) return null;
+    const w = this.canvas.width || 1;
+    const h = this.canvas.height || 1;
+    const view = lookAt(
+      eyeForMode(this.state, this.mode),
+      targetForMode(this.state, this.mode),
+      [0, 1, 0],
+    );
+    const vp = multiply(perspective(DEFAULT_FOV, w / h, 0.01, 1000), view);
+    const RADIUS = 0.08; // accept splats within 8% of the frame
+    const r2max = RADIUS * RADIUS;
+    let best = -1;
+    let bestScore = Infinity;
+    // Stride-sample very large scenes to keep picks instant.
+    const stride = s.count > 150000 ? Math.ceil(s.count / 150000) : 1;
+    for (let i = 0; i < s.count; i += stride) {
+      const px = s.positions[i * 3];
+      const py = s.positions[i * 3 + 1];
+      const pz = s.positions[i * 3 + 2];
+      const c = transformPoint4(vp, [px, py, pz]);
+      if (c[3] <= 0) continue; // behind camera
+      const ndcx = c[0] / c[3];
+      const ndcy = c[1] / c[3];
+      const sx = ndcx * 0.5 + 0.5;
+      const sy = 1 - (ndcy * 0.5 + 0.5); // flip to top-left origin
+      const dx = sx - nx;
+      const dy = sy - ny;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2max) continue;
+      const depth = c[2] / c[3]; // prefer nearer (frontmost) splats
+      const score = d2 + depth * 0.0015;
+      if (score < bestScore) {
+        bestScore = score;
+        best = i;
+      }
+    }
+    if (best < 0) return null;
+    return this.neighborhoodMedian(best);
+  }
+
+  /** Median position of splats near the chosen splat (robust to floaters). */
+  private neighborhoodMedian(index: number): Vec3 {
+    const s = this.splats!;
+    const cx = s.positions[index * 3];
+    const cy = s.positions[index * 3 + 1];
+    const cz = s.positions[index * 3 + 2];
+    const ext = Math.max(
+      0.001,
+      s.bounds.max[0] - s.bounds.min[0],
+      s.bounds.max[1] - s.bounds.min[1],
+      s.bounds.max[2] - s.bounds.min[2],
+    );
+    const rad = ext * 0.04;
+    const rad2 = rad * rad;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    const zs: number[] = [];
+    const stride = s.count > 150000 ? Math.ceil(s.count / 150000) : 1;
+    for (let i = 0; i < s.count; i += stride) {
+      const dx = s.positions[i * 3] - cx;
+      const dy = s.positions[i * 3 + 1] - cy;
+      const dz = s.positions[i * 3 + 2] - cz;
+      if (dx * dx + dy * dy + dz * dz <= rad2) {
+        xs.push(s.positions[i * 3]);
+        ys.push(s.positions[i * 3 + 1]);
+        zs.push(s.positions[i * 3 + 2]);
+      }
+    }
+    if (xs.length === 0) return [cx, cy, cz];
+    const med = (a: number[]) => {
+      a.sort((p, q) => p - q);
+      return a[a.length >> 1];
+    };
+    return [med(xs), med(ys), med(zs)];
+  }
+
+  /** Tint + glow splats within a sphere around `point`. */
+  highlightAt(point: Vec3, radius?: number): void {
+    this.hlCenter = point;
+    this.hlRadius = radius ?? Math.max(0.25, this.sceneDist() * 0.25);
+  }
+
+  clearHighlight(): void {
+    this.hlCenter = null;
+    this.hlRadius = 0;
+  }
+
+  /** True while a flyTo/lookAt animation is playing (agent is navigating). */
+  get isAnimating(): boolean {
+    return this.anim !== null;
+  }
+
+  private startAnim(to: CameraState, dur: number): void {
+    this.anim = { from: cloneState(this.state), to, t: 0, dur: Math.max(1, dur) };
+  }
+
+  private updateAnimation(dtMs: number): void {
+    if (!this.anim) return;
+    this.anim.t = Math.min(1, this.anim.t + dtMs / this.anim.dur);
+    const e = easeInOut(this.anim.t);
+    const a = this.anim.from;
+    const b = this.anim.to;
+    this.state.target = lerpVec(a.target, b.target, e);
+    this.state.position = lerpVec(a.position, b.position, e);
+    this.state.distance = lerp(a.distance, b.distance, e);
+    this.state.yaw = lerpAngle(a.yaw, b.yaw, e);
+    this.state.pitch = lerp(a.pitch, b.pitch, e);
+    if (this.anim.t >= 1) this.anim = null;
+  }
+
   capture(): string {
     if (this.gl) this.renderOnce();
     try {
@@ -241,6 +485,10 @@ export class SplatViewer {
       u_data: gl.getUniformLocation(program, 'u_data'),
       u_texWidth: gl.getUniformLocation(program, 'u_texWidth'),
       u_recordTexels: gl.getUniformLocation(program, 'u_recordTexels'),
+      // agent highlight
+      u_hlCenter: gl.getUniformLocation(program, 'u_hlCenter'),
+      u_hlRadius: gl.getUniformLocation(program, 'u_hlRadius'),
+      u_hlPulse: gl.getUniformLocation(program, 'u_hlPulse'),
     };
 
     this.vao = gl.createVertexArray();
@@ -392,6 +640,7 @@ export class SplatViewer {
     const dt = Math.min(0.1, Math.max(0, (t - this.lastFrameTs) / 1000));
     this.lastFrameTs = t;
 
+    this.updateAnimation(dt * 1000);
     this.controls?.update(dt);
 
     if (!gl || !this.program) {
@@ -432,6 +681,11 @@ export class SplatViewer {
       gl.uniform2f(this.uniforms.u_viewport, w, h);
       gl.uniform1f(this.uniforms.u_splatScale, this.splatScale);
 
+      const hc = this.hlCenter ?? [0, 0, 0];
+      gl.uniform3f(this.uniforms.u_hlCenter, hc[0], hc[1], hc[2]);
+      gl.uniform1f(this.uniforms.u_hlRadius, this.hlRadius);
+      gl.uniform1f(this.uniforms.u_hlPulse, 0.5 + 0.5 * Math.sin(t * 0.004));
+
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.splats.count);
       gl.bindVertexArray(null);
     }
@@ -462,6 +716,42 @@ export class SplatViewer {
 
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+// --- agent camera helpers ------------------------------------------------
+
+function clampAmount(a: number): number {
+  return Math.min(3, Math.max(0, a || 1));
+}
+
+function cloneState(s: CameraState): CameraState {
+  return {
+    target: [s.target[0], s.target[1], s.target[2]],
+    distance: s.distance,
+    yaw: s.yaw,
+    pitch: s.pitch,
+    position: [s.position[0], s.position[1], s.position[2]],
+  };
+}
+
+function easeInOut(t: number): number {
+  // easeInOutCubic
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function lerp(a: number, b: number, e: number): number {
+  return a + (b - a) * e;
+}
+
+function lerpVec(a: Vec3, b: Vec3, e: number): Vec3 {
+  return [lerp(a[0], b[0], e), lerp(a[1], b[1], e), lerp(a[2], b[2], e)];
+}
+
+function lerpAngle(a: number, b: number, e: number): number {
+  // shortest angular path: wrap (b-a) into [-π, π]
+  let diff = ((b - a + Math.PI) % (2 * Math.PI)) - Math.PI;
+  if (diff < -Math.PI) diff += 2 * Math.PI;
+  return a + diff * e;
 }
 
 function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader | null {

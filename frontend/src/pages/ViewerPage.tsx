@@ -7,6 +7,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { apiClient } from '../api/client';
+import { AgentChat } from '../components/AgentChat';
 import { SplatViewerReact, type SplatViewerHandle } from '../components/SplatViewerReact';
 import type { CameraMode } from '../viewer/SplatViewer';
 
@@ -106,6 +107,9 @@ export function ViewerPage({ shared = false }: { shared?: boolean }) {
           </div>
         </div>
       )}
+
+      {/* Agent chat — present in both owner + public/shared views */}
+      <AgentChat viewerRef={viewerRef} />
 
       {/* Bottom-left: mode switch + screenshot */}
       <div className="viewer-overlay bottom-left">

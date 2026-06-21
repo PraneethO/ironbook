@@ -32,6 +32,8 @@ export function NewWorld() {
   const existingId = params.id ?? null;
 
   const [name, setName] = useState('My 3D World');
+  const [splatUploading, setSplatUploading] = useState(false);
+  const splatInputRef = useRef<HTMLInputElement | null>(null);
   const [projectId, setProjectId] = useState<string | null>(existingId);
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
@@ -43,6 +45,20 @@ export function NewWorld() {
   const [health, setHealth] = useState<Health | null>(null);
   const [starting, setStarting] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const onUploadSplat = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSplatUploading(true);
+    setError(null);
+    try {
+      const proj = await apiClient.uploadSplat(file, name.trim() || 'Uploaded world');
+      navigate(`/projects/${proj.id}/viewer`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not upload that .splat file.');
+      setSplatUploading(false);
+    }
+  };
 
   useEffect(() => {
     apiClient.health().then(setHealth).catch(() => setHealth(null));
@@ -278,6 +294,31 @@ export function NewWorld() {
       </div>
 
       {uploading && <Spinner label="Checking your photos…" />}
+
+      {/* Direct .splat upload — skip reconstruction, navigate straight to viewer */}
+      <div className="section" style={{ marginTop: 32, borderTop: '1px solid var(--border)', paddingTop: 24 }}>
+        <h2 style={{ marginBottom: 8 }}>Already have a .splat file?</h2>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          Upload a pre-built Gaussian-splat scene directly — no photos needed. The
+          agent will navigate it for you.
+        </p>
+        <input
+          ref={splatInputRef}
+          type="file"
+          accept=".splat"
+          style={{ display: 'none' }}
+          onChange={onUploadSplat}
+          data-testid="splat-file-input"
+        />
+        <button
+          className="btn"
+          disabled={splatUploading}
+          onClick={() => splatInputRef.current?.click()}
+          data-testid="upload-splat-btn"
+        >
+          {splatUploading ? 'Uploading…' : '📦 Upload .splat'}
+        </button>
+      </div>
     </div>
   );
 }

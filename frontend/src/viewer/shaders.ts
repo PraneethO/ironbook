@@ -34,8 +34,14 @@ uniform mat4 u_proj;
 uniform vec2 u_viewport;
 uniform float u_splatScale;
 
+// Agent highlight
+uniform vec3 u_hlCenter;
+uniform float u_hlRadius;  // <= 0 means no highlight
+uniform float u_hlPulse;   // 0..1 animated
+
 out vec4 v_color;
 out vec2 v_offset;
+out float v_hl;
 
 vec4 fetch(int recordTexel) {
   int linear = int(a_index) * u_recordTexels + recordTexel;
@@ -124,6 +130,11 @@ void main() {
   gl_Position = vec4(ndc + ndcOffset, clip.z / clip.w, 1.0);
   v_color = color;
   v_offset = a_corner;
+  // Highlight: smooth sphere around agent-picked point (pulse baked in)
+  float hlBase = (u_hlRadius > 0.0)
+    ? smoothstep(u_hlRadius, u_hlRadius * 0.4, distance(center, u_hlCenter))
+    : 0.0;
+  v_hl = hlBase * (0.5 + 0.5 * u_hlPulse);
 }
 `;
 
@@ -132,6 +143,7 @@ precision highp float;
 
 in vec4 v_color;
 in vec2 v_offset;
+in float v_hl;
 out vec4 fragColor;
 
 void main() {
@@ -139,6 +151,13 @@ void main() {
   float alpha = exp(-0.5 * r2) * v_color.a;
   if (alpha < 0.004) discard;
   fragColor = vec4(v_color.rgb, alpha);
+  // Agent highlight: tint + glow (pulse already baked into v_hl from vertex shader)
+  if (v_hl > 0.0) {
+    vec3 hlTint = vec3(1.0, 0.85, 0.2);
+    fragColor.rgb = mix(fragColor.rgb, hlTint, 0.55 * v_hl);
+    fragColor.rgb += 0.25 * v_hl;
+  }
+  fragColor.rgb = clamp(fragColor.rgb, 0.0, 1.0);
 }
 `;
 

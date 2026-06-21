@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, Response, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from .. import config
@@ -78,6 +78,50 @@ def delete_project(project_id: str) -> Response:
     if not store.delete_project(project_id):
         raise HTTPException(status_code=404, detail="We couldn't find that 3D world.")
     return Response(status_code=204)
+
+
+# --- Direct .splat upload -------------------------------------------------
+
+
+@router.post("/upload_splat", response_model=Project, status_code=201)
+async def upload_splat(
+    file: UploadFile = File(...),
+    name: str = Form("Uploaded world"),
+) -> Project:
+    """Create a project directly from a pre-built `.splat` asset.
+
+    Lets the user bring their own Gaussian-splat scene (any source) and view +
+    navigate it with the agent, without going through photo reconstruction.
+    """
+    fname = file.filename or "scene.splat"
+    if Path(fname).suffix.lower() not in config.SPLAT_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a .splat file (the standard Gaussian-splat format).",
+        )
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="That .splat file looked empty.")
+    if len(data) % splat_format.SPLAT_BYTES != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "That doesn't look like a valid .splat file "
+                f"(size must be a multiple of {splat_format.SPLAT_BYTES} bytes)."
+            ),
+        )
+
+    record = store.create_project((name or "Uploaded world").strip() or "Uploaded world")
+    pid = record["id"]
+    asset_path = store.project_dir(pid) / "asset.splat"
+    asset_path.write_bytes(data)
+
+    record = store.load_project(pid) or record
+    record["status"] = "ready"
+    record["has_asset"] = True
+    record["photo_count"] = 0
+    store.save_project(record)
+    return _public(record)
 
 
 # --- Uploads --------------------------------------------------------------

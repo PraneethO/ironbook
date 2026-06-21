@@ -104,3 +104,56 @@ export interface AssetInfo {
 export interface ShareLink {
   url: string;
 }
+
+// --- Reasoning navigation agent (mirrors backend models.py additions) -----
+
+export type AgentActionType =
+  | 'move'
+  | 'rotate'
+  | 'zoom'
+  | 'fly_to'
+  | 'look_at'
+  | 'highlight'
+  | 'clear_highlight'
+  | 'reset_view';
+
+export type AgentDirection =
+  | 'forward'
+  | 'backward'
+  | 'left'
+  | 'right'
+  | 'up'
+  | 'down'
+  | 'clockwise'
+  | 'counterclockwise'
+  | 'in'
+  | 'out';
+
+export interface AgentAction {
+  type: AgentActionType;
+  direction?: AgentDirection;
+  amount?: number;
+  target_2d?: [number, number]; // [nx, ny] in [0,1], top-left origin
+  label?: string;
+}
+
+export interface AgentActResponse {
+  answer: string;
+  actions: AgentAction[];
+}
+
+export interface CameraSnapshot {
+  mode: string;
+  fov: number;
+  eye: [number, number, number];
+  target: [number, number, number];
+  bounds: {
+    min: [number, number, number];
+    max: [number, number, number];
+  };
+}
+
+export interface AgentTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}

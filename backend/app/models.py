@@ -82,3 +82,39 @@ class AssetInfo(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     reconstruction_backend: str
+
+
+# --- Reasoning navigation agent (CONTRACT extension) ---------------------
+
+
+class CameraSnapshot(BaseModel):
+    mode: str = "orbit"
+    fov: float = 1.0
+    eye: List[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])
+    target: List[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])
+    bounds: dict = Field(default_factory=lambda: {"min": [0, 0, 0], "max": [0, 0, 0]})
+
+
+class AgentTurn(BaseModel):
+    role: str  # "user" | "assistant"
+    text: str
+
+
+class AgentActRequest(BaseModel):
+    message: str
+    screenshot_b64: Optional[str] = None  # PNG base64, no data: prefix
+    camera: CameraSnapshot = Field(default_factory=CameraSnapshot)
+    history: List[AgentTurn] = Field(default_factory=list)
+
+
+class AgentAction(BaseModel):
+    type: str
+    direction: Optional[str] = None
+    amount: Optional[float] = None
+    target_2d: Optional[List[float]] = None
+    label: Optional[str] = None
+
+
+class AgentActResponse(BaseModel):
+    answer: str
+    actions: List[AgentAction] = Field(default_factory=list)

@@ -128,6 +128,20 @@ export function transformPoint(m: Mat4, p: Vec3): Vec3 {
   return [x / w, y / w, z / w];
 }
 
+/** Transform a point by a column-major matrix, returning homogeneous [x,y,z,w]
+ *  WITHOUT the perspective divide (caller inspects w, e.g. to reject points
+ *  behind the camera before dividing). */
+export function transformPoint4(
+  m: Mat4,
+  p: Vec3,
+): [number, number, number, number] {
+  const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+  const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+  const z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
+  const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+  return [x, y, z, w];
+}
+
 /** View-space depth (distance along view -Z) of a world point. Larger = farther. */
 export function viewDepth(viewMatrix: Mat4, p: Vec3): number {
   // In view space, camera looks down -Z, so farther points have more negative z.
