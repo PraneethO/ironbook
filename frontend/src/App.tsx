@@ -27,11 +27,12 @@ function TopBar() {
   );
 }
 
-function CrashFallback({ error }: { error: Error }) {
+function CrashFallback({ error }: { error: unknown }) {
+  const message = error instanceof Error ? error.message : String(error);
   return (
     <div style={{ padding: '2rem', color: '#fff' }}>
       <h2>Something went wrong</h2>
-      <pre style={{ opacity: 0.6, fontSize: 12 }}>{error.message}</pre>
+      <pre style={{ opacity: 0.6, fontSize: 12 }}>{message}</pre>
       <button className="btn btn-primary" onClick={() => window.location.reload()}>
         Reload
       </button>
