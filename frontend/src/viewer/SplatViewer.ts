@@ -61,6 +61,7 @@ import { parseSplat, ParsedSplats } from './SplatLoader';
 import { FRAGMENT_SHADER, VERTEX_SHADER } from './shaders';
 import { sortByDepth } from './sort';
 import { generateSplatTexture } from './splatTexture';
+import { GridOverlay } from './grid';
 
 export type { CameraMode };
 
@@ -88,6 +89,9 @@ export class SplatViewer {
   private _splatCount = 0;
   private sceneRadius = 1;
 
+  private grid: GridOverlay | null = null;
+  private gridVisible = true;
+
   private program: WebGLProgram | null = null;
   private vao: WebGLVertexArrayObject | null = null;
   private quadBuffer: WebGLBuffer | null = null;
@@ -105,7 +109,7 @@ export class SplatViewer {
   private rafId = 0;
   private disposed = false;
   private splatScale = 1.0;
-  private bgColor: [number, number, number] = [0.04, 0.05, 0.07];
+  private bgColor: [number, number, number] = [0.118, 0.118, 0.118]; // #1e1e1e
 
   // --- agent-driven camera animation + highlight ---
   private anim: { from: CameraState; to: CameraState; t: number; dur: number } | null = null;
@@ -203,6 +207,7 @@ export class SplatViewer {
         1e-3,
         length(vscale(sub(parsed.bounds.max, parsed.bounds.min), 0.5)),
       );
+      if (this.gl) this.grid?.setBounds(this.gl, parsed.bounds.min, parsed.bounds.max);
     }
 
     this.initWorker(buf, parsed.count);
@@ -223,6 +228,15 @@ export class SplatViewer {
 
   getMode(): CameraMode {
     return this.mode;
+  }
+
+  /** Show/hide the ground grid + XYZ axes overlay. */
+  setGridVisible(visible: boolean): void {
+    this.gridVisible = visible;
+  }
+
+  isGridVisible(): boolean {
+    return this.gridVisible;
   }
 
   resetCamera(): void {
@@ -551,6 +565,7 @@ export class SplatViewer {
       [this.quadBuffer, this.indexBuffer].forEach((b) => b && gl.deleteBuffer(b));
       if (this.dataTexture) gl.deleteTexture(this.dataTexture);
       if (this.vao) gl.deleteVertexArray(this.vao);
+      this.grid?.dispose(gl);
     }
     this.resolveFirstFrame();
   }
@@ -604,6 +619,8 @@ export class SplatViewer {
       gl.ONE,
     );
     gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+
+    this.grid = new GridOverlay(gl);
   }
 
   private uploadTexture(
@@ -749,6 +766,11 @@ export class SplatViewer {
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 0); // transparent; CSS supplies the background
     gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // Floor grid + axes drawn first so the splats composite on top.
+    if (this.gridVisible && this.splats && this.splats.count > 0) {
+      this.grid?.draw(gl, view, proj);
+    }
 
     if (
       this.splats &&

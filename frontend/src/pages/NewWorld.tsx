@@ -228,11 +228,10 @@ export function NewWorld() {
         onDrop={onDrop}
         data-testid="dropzone"
       >
-        <div className="big" style={{ fontSize: 34 }}>📷</div>
-        <p style={{ margin: '8px 0 4px', fontWeight: 600 }}>
-          Drag &amp; drop photos here, or click to choose
+        <p style={{ margin: '0 0 6px', fontWeight: 500 }}>
+          [ DROP PHOTOS &mdash; OR CLICK ]
         </p>
-        <p className="faint">JPG, PNG or HEIC. Video (MP4/MOV) supported when available.</p>
+        <p className="faint">JPG · PNG · HEIC · MP4/MOV when available</p>
         <input
           ref={inputRef}
           type="file"
@@ -261,11 +260,14 @@ export function NewWorld() {
         {report && <Stat label="Accepted" value={report.accepted} />}
         {report && (
           <Stat
-            label="Estimated quality"
+            tone="success"
+            label="Quality"
             value={`${qualityLabel(report.quality_score)} (${Math.round(report.quality_score * 100)}%)`}
           />
         )}
-        {report && <Stat label="Coverage" value={`${Math.round(report.coverage_score * 100)}%`} />}
+        {report && (
+          <Stat tone="success" label="Coverage" value={`${Math.round(report.coverage_score * 100)}%`} />
+        )}
       </div>
 
       {imageFiles.length > 0 && imageFiles.length < 8 && (
@@ -337,7 +339,7 @@ export function NewWorld() {
               disabled={!report.ready_to_reconstruct || starting}
               onClick={onStart}
             >
-              {starting ? 'Starting…' : 'Create my world ✨'}
+              {starting ? 'Starting…' : 'Create my world'}
             </button>
           </>
         )}
@@ -368,7 +370,7 @@ export function NewWorld() {
           onClick={() => splatInputRef.current?.click()}
           data-testid="upload-splat-btn"
         >
-          {splatUploading ? 'Uploading…' : '📦 Upload .splat / .ply'}
+          {splatUploading ? 'Uploading…' : 'Upload .splat / .ply'}
         </button>
 
         <p className="muted" style={{ margin: '16px 0 8px' }}>
@@ -380,7 +382,7 @@ export function NewWorld() {
           onClick={onLoadDemo}
           data-testid="load-demo-btn"
         >
-          {demoLoading ? 'Loading demo…' : '🚲 See the demo bike'}
+          {demoLoading ? 'Loading demo…' : 'See the demo bike'}
         </button>
       </div>
     </div>

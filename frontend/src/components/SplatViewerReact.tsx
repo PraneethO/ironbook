@@ -20,6 +20,7 @@ export interface SplatViewerHandle {
   resetCamera: () => void;
   setSplatScale: (s: number) => void;
   setBackgroundColor: (r: number, g: number, b: number) => void;
+  setGridVisible: (visible: boolean) => void;
 }
 
 export interface SplatViewerReactProps {
@@ -48,6 +49,7 @@ export const SplatViewerReact = forwardRef<SplatViewerHandle, SplatViewerReactPr
       setSplatScale: (s: number) => viewerRef.current?.setSplatScale(s),
       setBackgroundColor: (r: number, g: number, b: number) =>
         viewerRef.current?.setBackgroundColor(r, g, b),
+      setGridVisible: (visible: boolean) => viewerRef.current?.setGridVisible(visible),
     }));
 
     // Create the engine once.

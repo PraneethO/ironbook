@@ -143,9 +143,11 @@ async def create_demo() -> Project:
     if not _DEMO_ASSET.exists():
         raise HTTPException(status_code=404, detail="The demo scene isn't available.")
 
-    # Reuse an existing demo project so repeated clicks don't pile up.
+    # Reuse an existing demo project so repeated clicks don't pile up; refresh its
+    # asset from the bundled file so updates to the demo scene always take effect.
     for rec in store.list_projects():
-        if rec.get("is_demo") and (store.project_dir(rec["id"]) / "asset.splat").exists():
+        if rec.get("is_demo"):
+            shutil.copyfile(_DEMO_ASSET, store.project_dir(rec["id"]) / "asset.splat")
             return _public(rec)
 
     record = store.create_project("Demo Bike")

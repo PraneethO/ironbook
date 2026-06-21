@@ -207,12 +207,12 @@ export function VoiceButton({ onTranscript, disabled }: Props) {
 
   const label =
     state === 'connecting'
-      ? '⏳'
+      ? '···'
       : state === 'listening'
-        ? '🔴'
+        ? 'REC'
         : state === 'error'
-          ? '⚠️'
-          : '🎙️';
+          ? 'ERR'
+          : 'MIC';
 
   const title =
     state === 'idle'

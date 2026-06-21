@@ -1,14 +1,15 @@
 /**
  * 3D Viewer (screen 5). Full-screen canvas wrapping the engine via
- * SplatViewerReact. Mode switcher (Orbit / Walk / Fly / Screenshot), an
- * on-screen controls-help overlay, and an FPS + splat-count readout. Loads
+ * SplatViewerReact, with a left worlds/annotations sidebar, a right-side
+ * navigation-agent panel, and a bottom status/tool bar. Loads
  * /api/projects/{id}/asset. Also serves the public /view/:id shared route.
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import { AgentChat } from '../components/AgentChat';
 import { SplatViewerReact, type SplatViewerHandle } from '../components/SplatViewerReact';
+import type { Project } from '../api/types';
 import type { CameraMode } from '../viewer/SplatViewer';
 
 const MODES: { key: CameraMode; label: string }[] = [
@@ -28,6 +29,22 @@ export function ViewerPage({ shared = false }: { shared?: boolean }) {
   const [progress, setProgress] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [gridOn, setGridOn] = useState(true);
+  const [worlds, setWorlds] = useState<Project[] | null>(null);
+  const [panelsOpen, setPanelsOpen] = useState(true);
+
+  useEffect(() => {
+    if (shared) return;
+    apiClient.listProjects().then(setWorlds).catch(() => setWorlds([]));
+  }, [shared]);
+
+  const onToggleGrid = () => {
+    setGridOn((on) => {
+      const next = !on;
+      viewerRef.current?.setGridVisible(next);
+      return next;
+    });
+  };
 
   const src = useMemo(() => (id ? apiClient.assetUrl(id) : undefined), [id]);
 
@@ -73,18 +90,28 @@ export function ViewerPage({ shared = false }: { shared?: boolean }) {
 
       {error && (
         <div className="viewer-error">
-          <div style={{ fontSize: 32 }}>😕</div>
+          <div style={{ color: 'var(--danger)' }}>Error</div>
           <div>{error}</div>
           <Link className="btn" to="/">Back to my worlds</Link>
         </div>
       )}
 
-      {/* Top-left: navigation / title */}
+      {/* Top-left: panel toggle + navigation */}
       <div className="viewer-overlay top-left">
-        <div className="glass">
+        <div className="glass row-actions" style={{ gap: 2 }}>
+          {!shared && (
+            <button
+              className="btn btn-ghost"
+              onClick={() => setPanelsOpen((o) => !o)}
+              title="Toggle panels"
+              data-testid="toggle-panels"
+            >
+              ☰ Files
+            </button>
+          )}
           {shared ? (
-            <Link to="/" className="brand" style={{ fontSize: 15 }}>
-              <span className="logo" aria-hidden /> Gaussian Splat World
+            <Link to="/" className="brand">
+              <span className="logo" aria-hidden /> IRONBOOK
             </Link>
           ) : (
             <button className="btn btn-ghost" onClick={() => navigate('/')}>
@@ -108,45 +135,82 @@ export function ViewerPage({ shared = false }: { shared?: boolean }) {
         </div>
       )}
 
-      {/* Agent chat — present in both owner + public/shared views */}
+      {/* Left sidebar: past worlds (file system) + annotations */}
+      {!shared && panelsOpen && (
+        <aside className="viewer-sidebar left" data-testid="worlds-panel">
+          <div className="sidebar-section grow">
+            <div className="sidebar-header">Worlds</div>
+            <div className="sidebar-body">
+              <div className="world-list">
+                {worlds === null && <div className="annot-empty">Loading…</div>}
+                {worlds && worlds.length === 0 && (
+                  <div className="annot-empty">No worlds yet.</div>
+                )}
+                {worlds?.map((w) => (
+                  <button
+                    key={w.id}
+                    className={`world-item${w.id === id ? ' active' : ''}`}
+                    onClick={() => navigate(`/projects/${w.id}/viewer`)}
+                    title={w.name}
+                    data-testid="worlds-item"
+                  >
+                    <span className={`wi-dot ${w.status}`} aria-hidden />
+                    <span className="wi-name">{w.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="sidebar-section">
+            <div className="sidebar-header">Annotations</div>
+            <div className="sidebar-body">
+              <div className="annot-empty">
+                No annotations yet. Pin notes to points in the scene to label and
+                measure features.
+              </div>
+              <div className="annot-add" title="Coming soon">+ Add annotation (soon)</div>
+            </div>
+          </div>
+        </aside>
+      )}
+
+      {/* Navigation agent — right sidebar */}
       <AgentChat viewerRef={viewerRef} />
 
-      {/* Bottom-left: mode switch + screenshot */}
-      <div className="viewer-overlay bottom-left">
-        <div className="glass">
-          <div className="mode-switch">
-            {MODES.map((m) => (
-              <button
-                key={m.key}
-                className={mode === m.key ? 'active' : ''}
-                onClick={() => setMode(m.key)}
-                data-testid={`mode-${m.key}`}
-              >
-                {m.label}
-              </button>
-            ))}
-            <button onClick={onScreenshot} data-testid="mode-screenshot" title="Save screenshot">
-              📸 Screenshot
+      {/* Bottom status / tool bar */}
+      <div className="status-bar">
+        <div className="mode-switch">
+          {MODES.map((m) => (
+            <button
+              key={m.key}
+              className={mode === m.key ? 'active' : ''}
+              onClick={() => setMode(m.key)}
+              data-testid={`mode-${m.key}`}
+            >
+              {m.label}
             </button>
-          </div>
+          ))}
+          <button onClick={onScreenshot} data-testid="mode-screenshot" title="Save screenshot">
+            Capture
+          </button>
+          <button
+            className={gridOn ? 'active' : ''}
+            onClick={onToggleGrid}
+            data-testid="toggle-grid"
+            title="Toggle ground grid + axes"
+          >
+            {gridOn ? 'Grid on' : 'Grid off'}
+          </button>
         </div>
-      </div>
 
-      {/* Bottom-right: controls help + readout */}
-      <div className="viewer-overlay bottom-right">
-        <div className="glass" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <ul className="help-list">
-            <li><kbd>Drag</kbd> look / orbit</li>
-            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</li>
-            <li><kbd>Scroll</kbd> zoom</li>
-            <li><kbd>Shift</kbd> move faster</li>
-            <li><kbd>Space</kbd>/<kbd>C</kbd> up / down (fly)</li>
-          </ul>
-          <div className="readout">
-            <span><b>{fps}</b> fps</span>
-            <span><b>{splatCount.toLocaleString()}</b> splats</span>
-          </div>
+        <div className="spacer" />
+        <div className="sb-item">
+          Drag look · WASD move · Scroll zoom · Shift faster · Space/C up/down
         </div>
+        <div className="spacer" />
+        <div className="sb-item"><b>{fps}</b> fps</div>
+        <div className="sb-item"><b>{splatCount.toLocaleString()}</b> splats</div>
       </div>
     </div>
   );

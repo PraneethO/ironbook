@@ -2,7 +2,7 @@
  * App — router + shared chrome. Routes map to the 8 key screens from
  * 04_user_experience.md plus the public /view/:id shared-link route.
  */
-import { Link, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import * as Sentry from '@sentry/react';
 import { Dashboard } from './pages/Dashboard';
 import { NewWorld } from './pages/NewWorld';
@@ -18,11 +18,20 @@ function TopBar() {
     <header className="topbar">
       <Link className="brand" to="/">
         <span className="logo" aria-hidden />
-        Gaussian Splat World
+        IRONBOOK
       </Link>
-      <Link className="btn btn-primary" to="/new">
-        + New 3D World
-      </Link>
+      <nav className="topnav">
+        <NavLink
+          to="/"
+          end
+          className={({ isActive }) => `topnav-link${isActive ? ' active' : ''}`}
+        >
+          My Worlds
+        </NavLink>
+        <Link className="btn btn-primary" to="/new">
+          + New World
+        </Link>
+      </nav>
     </header>
   );
 }

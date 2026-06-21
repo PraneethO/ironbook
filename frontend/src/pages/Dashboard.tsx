@@ -76,20 +76,13 @@ export function Dashboard() {
           build). Full multi-view 3D Gaussian Splatting runs on the GPU engine.
         </Notice>
       )}
-      {health?.reconstruction_backend === 'fallback' && (
-        <Notice kind="info">
-          You're in <b>demo mode</b>: worlds are built with a quick preview reconstructor so you
-          can try the full flow. Results improve with the full engine.
-        </Notice>
-      )}
-
       {error && <Notice kind="error">{error}</Notice>}
 
       {projects === null ? (
         <Spinner label="Loading your worlds…" />
       ) : projects.length === 0 ? (
         <div className="empty-state">
-          <div className="big">🌍</div>
+          <div className="big" style={{ fontSize: 26 }}>∅</div>
           <h2>No worlds yet</h2>
           <p>Upload photos of a room, object, or place to build your first 3D world.</p>
           <button
@@ -113,7 +106,9 @@ export function Dashboard() {
                 {p.thumbnail_url ? (
                   <img src={apiClient.thumbnailUrl(p.id)} alt={p.name} />
                 ) : (
-                  <span>🖼️</span>
+                  <span className="muted" style={{ fontSize: 10, letterSpacing: '0.15em' }}>
+                    NO PREVIEW
+                  </span>
                 )}
               </div>
               <div className="project-body">

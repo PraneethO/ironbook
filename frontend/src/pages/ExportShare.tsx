@@ -105,13 +105,13 @@ export function ExportShare() {
         )}
         <div className="row-actions">
           <button className="btn btn-primary" onClick={onDownload}>
-            ⬇ Download 3D file (.splat)
+            Download 3D file (.splat)
           </button>
           <button className="btn" onClick={onScreenshot}>
-            📸 Save screenshot
+            Save screenshot
           </button>
           <button className="btn" disabled title="Coming soon">
-            🎬 Video flythrough (coming soon)
+            Video flythrough (coming soon)
           </button>
         </div>
       </div>

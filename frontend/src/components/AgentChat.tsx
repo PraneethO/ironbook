@@ -203,16 +203,18 @@ export function AgentChat({ viewerRef }: Props) {
 
   return (
     <>
-      {/* Toggle button — positioned absolutely so pointer-events work */}
-      <button
-        className="btn agent-toggle"
-        style={{ position: 'absolute', bottom: 130, right: 16, zIndex: 60, pointerEvents: 'auto' }}
-        onClick={() => setOpen((o) => !o)}
-        title="Ask the navigation agent"
-        data-testid="agent-toggle"
-      >
-        🤖 {open ? 'Close' : 'Ask'}
-      </button>
+      {/* Toggle button — bottom-right, hidden while the panel is open */}
+      {!open && (
+        <button
+          className="btn agent-toggle glass"
+          style={{ position: 'absolute', bottom: 52, right: 16, zIndex: 60, pointerEvents: 'auto' }}
+          onClick={() => setOpen(true)}
+          title="Ask the navigation agent"
+          data-testid="agent-toggle"
+        >
+          Ask Agent
+        </button>
+      )}
 
       {open && (
         <div className="agent-chat glass" data-testid="agent-chat">
@@ -227,6 +229,7 @@ export function AgentChat({ viewerRef }: Props) {
               className="btn btn-ghost"
               style={{ padding: '2px 8px', fontSize: 12 }}
               onClick={() => setOpen(false)}
+              data-testid="agent-close"
             >
               ✕
             </button>
@@ -267,7 +270,7 @@ export function AgentChat({ viewerRef }: Props) {
               ref={inputRef}
               type="text"
               className="agent-input"
-              placeholder="Type or hold 🎙️ to speak…"
+              placeholder="Type a command, or hold mic to speak…"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}

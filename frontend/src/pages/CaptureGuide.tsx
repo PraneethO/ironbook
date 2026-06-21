@@ -2,12 +2,12 @@
 import { useNavigate } from 'react-router-dom';
 
 const TIPS: { icon: string; title: string; body: string }[] = [
-  { icon: '🚶', title: 'Walk all the way around', body: 'Move around the object or space so every side gets seen.' },
-  { icon: '🔁', title: 'Overlap your shots', body: 'Each photo should share a good chunk with the last one.' },
-  { icon: '✨', title: 'Keep it sharp', body: 'Avoid blurry photos — hold steady and use good light.' },
-  { icon: '📐', title: 'Many angles', body: 'High, low, near and far. Variety builds a fuller world.' },
-  { icon: '🎥', title: 'Move slowly on video', body: 'If you record video, pan slowly so frames stay crisp.' },
-  { icon: '🙈', title: 'Capture hidden sides', body: 'Anything you skip may end up with holes in the 3D world.' },
+  { icon: '01', title: 'Walk all the way around', body: 'Move around the object or space so every side gets seen.' },
+  { icon: '02', title: 'Overlap your shots', body: 'Each photo should share a good chunk with the last one.' },
+  { icon: '03', title: 'Keep it sharp', body: 'Avoid blurry photos — hold steady and use good light.' },
+  { icon: '04', title: 'Many angles', body: 'High, low, near and far. Variety builds a fuller world.' },
+  { icon: '05', title: 'Move slowly on video', body: 'If you record video, pan slowly so frames stay crisp.' },
+  { icon: '06', title: 'Capture hidden sides', body: 'Anything you skip may end up with holes in the 3D world.' },
 ];
 
 export function CaptureGuide() {

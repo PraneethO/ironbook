@@ -70,15 +70,15 @@ function openPanel() {
 // ---------------------------------------------------------------------------
 
 describe('AgentChat panel', () => {
-  it('renders the panel open by default and toggle closes it', () => {
+  it('renders the panel open by default; header closes it and the toggle reopens', () => {
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
     // Panel is open by default
     expect(screen.getByTestId('agent-chat')).toBeTruthy();
-    // Toggle closes it
-    openPanel();
+    // Header ✕ closes it (the toggle is hidden while open)
+    fireEvent.click(screen.getByTestId('agent-close'));
     expect(screen.queryByTestId('agent-chat')).toBeNull();
-    // Toggle again reopens
+    // The toggle reopens it
     openPanel();
     expect(screen.getByTestId('agent-chat')).toBeTruthy();
   });

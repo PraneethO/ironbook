@@ -51,6 +51,7 @@ vi.mock('../src/api/client', () => ({
     assetUrl: (id: string) => `/api/projects/${id}/asset`,
     agentAct: vi.fn(),
     voiceConfig: vi.fn().mockResolvedValue({ deepgram_key: 'test-key', model: 'nova-2' }),
+    listProjects: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -100,8 +101,8 @@ describe('ViewerPage', () => {
 
   it('shows the controls help overlay (WASD, scroll, shift)', async () => {
     setup();
-    expect(screen.getByText(/look \/ orbit/i)).toBeInTheDocument();
-    expect(screen.getByText(/move faster/i)).toBeInTheDocument();
+    expect(screen.getByText(/WASD move/i)).toBeInTheDocument();
+    expect(screen.getByText(/Shift faster/i)).toBeInTheDocument();
     await waitFor(() => expect(instances[0].loadedUrls.length).toBeGreaterThan(0));
   });
 

@@ -62,11 +62,12 @@ describe('Dashboard', () => {
     expect(screen.getByText('42 photos')).toBeInTheDocument();
   });
 
-  it('shows the demo-mode notice when backend is fallback', async () => {
+  it('does not surface a demo-mode notice', async () => {
     renderDash();
     await waitFor(() => {
-      expect(screen.getByText(/demo mode/i)).toBeInTheDocument();
+      expect(screen.getAllByTestId('project-card').length).toBeGreaterThan(0);
     });
+    expect(screen.queryByText(/demo mode/i)).toBeNull();
   });
 
   it('renders friendly status labels (no jargon)', async () => {

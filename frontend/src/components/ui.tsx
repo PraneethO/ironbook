@@ -33,9 +33,17 @@ export function Spinner({ label }: { label?: string }) {
   );
 }
 
-export function Stat({ label, value }: { label: string; value: ReactNode }) {
+export function Stat({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: 'default' | 'success';
+}) {
   return (
-    <div className="stat">
+    <div className={`stat${tone === 'success' ? ' stat-conf' : ''}`}>
       <div className="label">{label}</div>
       <div className="value">{value}</div>
     </div>
