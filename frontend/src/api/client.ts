@@ -7,6 +7,7 @@
  * `detail` message) on non-2xx responses.
  */
 
+import * as Sentry from '@sentry/react';
 import type {
   AgentActResponse,
   AgentTurn,
@@ -40,13 +41,25 @@ async function parseError(res: Response): Promise<never> {
   } catch {
     /* non-JSON error body */
   }
-  throw new ApiError(res.status, detail);
+  const err = new ApiError(res.status, detail);
+  // Report 5xx server errors to Sentry; 4xx are user/client errors.
+  if (res.status >= 500) {
+    Sentry.captureException(err, { tags: { api_path: res.url, http_status: res.status } });
+  }
+  throw err;
 }
 
 async function jsonRequest<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  Sentry.addBreadcrumb({
+    category: 'api',
+    message: `${method} ${path}`,
+    level: 'info',
+    type: 'http',
+  });
   const res = await fetch(`${API_BASE}${path}`, init);
   if (!res.ok) await parseError(res);
   if (res.status === 204) return undefined as T;

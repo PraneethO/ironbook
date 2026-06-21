@@ -23,6 +23,11 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-4-6")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 
+# Observability — both optional; app runs without them.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
+
 # When set, reconstruct jobs run synchronously to completion (used by tests).
 RECONSTRUCT_INLINE = os.environ.get("RECONSTRUCT_INLINE", "0") == "1"
 

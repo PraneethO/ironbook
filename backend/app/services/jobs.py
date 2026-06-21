@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+import sentry_sdk
+
 from .. import config
 from ..reconstruction import NotAvailable, ReconstructionBackend, select_backend
 from . import store
@@ -153,48 +155,65 @@ def _run_job(project_id: str, inline: bool = False) -> None:
         else:
             _maybe_persist()
 
-    try:
-        # Preprocessing (images were normalized at upload). Show it, then let
-        # the backend drive the remaining real stages via progress_cb.
-        job["status"] = "processing"
-        job["current_stage"] = "preprocessing"
-        job["stages"][0]["status"] = "active"
-        _log(job, "info", "preprocessing", "Preparing your photos…")
-        _persist(project_id, job, project_status="processing")
-        job["stages"][0]["status"] = "done"
-        job["stages"][0]["progress"] = 1.0
-        job["progress"] = round(1 / n_stages, 3)
-        _persist(project_id, job)
+    with sentry_sdk.start_transaction(
+        op="job.reconstruction",
+        name="reconstruction",
+        sampled=True,
+    ) as txn:
+        txn.set_tag("project_id", project_id)
+        txn.set_tag("backend", _BACKEND.name)
 
-        images = _input_images(project_id)
-        _BACKEND.reconstruct(store.project_dir(project_id), images, progress_cb)
+        try:
+            with sentry_sdk.start_span(op="stage.preprocessing", description="Preparing photos"):
+                job["status"] = "processing"
+                job["current_stage"] = "preprocessing"
+                job["stages"][0]["status"] = "active"
+                _log(job, "info", "preprocessing", "Preparing your photos…")
+                _persist(project_id, job, project_status="processing")
+                job["stages"][0]["status"] = "done"
+                job["stages"][0]["progress"] = 1.0
+                job["progress"] = round(1 / n_stages, 3)
+                _persist(project_id, job)
 
-        # All real work done — mark every stage complete.
-        for st in job["stages"]:
-            st["status"] = "done"
-            st["progress"] = 1.0
-        job["status"] = "ready"
-        job["current_stage"] = None
-        job["progress"] = 1.0
-        _log(job, "info", "viewer_asset", "Your 3D world is ready to explore!")
-        record = store.load_project(project_id) or record
-        record["job"] = job
-        record["status"] = "ready"
-        record["has_asset"] = (store.project_dir(project_id) / "asset.splat").exists()
-        store.save_project(record)
+            images = _input_images(project_id)
+            txn.set_data("image_count", len(images))
 
-    except NotAvailable as exc:
-        _fail(project_id, job, str(exc))
-    except Exception as exc:  # noqa: BLE001 - convert to friendly message
-        _fail(
-            project_id,
-            job,
-            "Something went wrong while building your 3D world. "
-            "Try uploading more photos from different angles.",
-        )
-        # Keep the technical detail only in logs for power users.
-        _log(job, "error", job.get("current_stage") or "optimization", f"detail: {exc}")
-        _persist(project_id, job)
+            with sentry_sdk.start_span(op="stage.reconstruction", description="3D reconstruction"):
+                _BACKEND.reconstruct(store.project_dir(project_id), images, progress_cb)
+
+            # All real work done — mark every stage complete.
+            for st in job["stages"]:
+                st["status"] = "done"
+                st["progress"] = 1.0
+            job["status"] = "ready"
+            job["current_stage"] = None
+            job["progress"] = 1.0
+            _log(job, "info", "viewer_asset", "Your 3D world is ready to explore!")
+            record = store.load_project(project_id) or record
+            record["job"] = job
+            record["status"] = "ready"
+            record["has_asset"] = (store.project_dir(project_id) / "asset.splat").exists()
+            store.save_project(record)
+            txn.set_tag("status", "success")
+
+        except NotAvailable as exc:
+            sentry_sdk.capture_exception(exc)
+            txn.set_tag("status", "failed")
+            txn.set_tag("failure_reason", "backend_unavailable")
+            _fail(project_id, job, str(exc))
+        except Exception as exc:  # noqa: BLE001 - convert to friendly message
+            sentry_sdk.capture_exception(exc)
+            txn.set_tag("status", "failed")
+            txn.set_tag("failure_stage", job.get("current_stage") or "unknown")
+            _fail(
+                project_id,
+                job,
+                "Something went wrong while building your 3D world. "
+                "Try uploading more photos from different angles.",
+            )
+            # Keep the technical detail only in logs for power users.
+            _log(job, "error", job.get("current_stage") or "optimization", f"detail: {exc}")
+            _persist(project_id, job)
 
 
 def _fail(project_id: str, job: dict, friendly: str) -> None:

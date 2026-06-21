@@ -6,12 +6,37 @@ the COLMAP+gsplat path plugs in behind the same interface when a GPU exists.
 """
 from __future__ import annotations
 
+import os
+
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from . import config
 from .routers import agent, health, projects
 from .services import store
+
+# --- Sentry (must init before FastAPI app is created) ---
+_sentry_integrations = [
+    StarletteIntegration(transaction_style="endpoint"),
+    FastApiIntegration(transaction_style="endpoint"),
+]
+try:
+    from sentry_sdk.integrations.anthropic import AnthropicIntegration
+    _sentry_integrations.append(AnthropicIntegration(include_prompts=True))
+except ImportError:
+    pass
+
+if config.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=config.SENTRY_DSN,
+        integrations=_sentry_integrations,
+        traces_sample_rate=1.0,
+        send_default_pii=True,
+        environment=os.environ.get("ENVIRONMENT", "development"),
+    )
 
 app = FastAPI(title="Gaussian Splat World API", version="1.0.0")
 

@@ -12,12 +12,33 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+import sentry_sdk
+
 from .. import config
 
 try:  # anthropic is optional at import time so tests/CI without it still load
     import anthropic
 except Exception:  # pragma: no cover
     anthropic = None  # type: ignore
+
+# Langfuse is optional — degrades gracefully to no-ops when not configured.
+try:
+    from langfuse.decorators import langfuse_context as _lf_ctx
+    from langfuse.decorators import observe as _lf_observe
+    _langfuse_ok = True
+except Exception:  # pragma: no cover
+    _langfuse_ok = False
+
+    class _NoopCtx:
+        def update_current_trace(self, **kw: Any) -> None: pass
+        def update_current_observation(self, **kw: Any) -> None: pass
+
+    _lf_ctx = _NoopCtx()  # type: ignore[assignment]
+
+    def _lf_observe(func: Any = None, **kw: Any) -> Any:  # type: ignore[misc]
+        def dec(f: Any) -> Any:
+            return f
+        return dec if func is None else func
 
 
 def _make_client():
@@ -136,6 +157,7 @@ def _history_to_messages(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return out
 
 
+@_lf_observe(name="agent-act")
 def run_agent(
     message: str,
     screenshot_b64: Optional[str],
@@ -143,14 +165,42 @@ def run_agent(
     history: List[Dict[str, str]],
 ) -> Dict[str, Any]:
     """Return {"answer": str, "actions": [..]}. Never raises for normal errors."""
+    sentry_sdk.set_tag("agent.model", config.AGENT_MODEL)
+    sentry_sdk.add_breadcrumb(
+        category="agent",
+        message="agent call started",
+        data={
+            "message_preview": message[:200],
+            "has_screenshot": bool(screenshot_b64),
+            "camera_mode": camera.get("mode"),
+            "history_turns": len(history),
+        },
+        level="info",
+    )
+    _lf_ctx.update_current_trace(
+        tags=["navigation", "vision-grounded"],
+        metadata={"model": config.AGENT_MODEL},
+    )
+    _lf_ctx.update_current_observation(
+        input={
+            "message": message,
+            "has_screenshot": bool(screenshot_b64),
+            "camera_mode": camera.get("mode"),
+            "history_turns": len(history),
+        },
+        model=config.AGENT_MODEL,
+    )
+
     if _client is None:
-        return {
+        result: Dict[str, Any] = {
             "answer": (
                 "The navigation agent isn't configured yet — set ANTHROPIC_API_KEY "
                 "in backend/.env and restart the server."
             ),
             "actions": [],
         }
+        _lf_ctx.update_current_observation(output=result, level="WARNING")
+        return result
 
     user_content: List[Dict[str, Any]] = []
     if screenshot_b64:
@@ -186,13 +236,21 @@ def run_agent(
             messages=messages,
         )
     except Exception as exc:  # network / API errors -> friendly fallback
+        sentry_sdk.capture_exception(exc)
+        _lf_ctx.update_current_observation(
+            output={"error": str(exc)},
+            level="ERROR",
+            status_message=str(exc),
+        )
         return {
             "answer": f"Sorry, the agent hit an error talking to the model: {exc}",
             "actions": [],
         }
 
     if getattr(resp, "stop_reason", None) == "refusal":
-        return {"answer": "I can't help with that request.", "actions": []}
+        result = {"answer": "I can't help with that request.", "actions": []}
+        _lf_ctx.update_current_observation(output=result, level="WARNING")
+        return result
 
     text = ""
     for block in resp.content:
@@ -202,10 +260,12 @@ def run_agent(
     try:
         data = json.loads(text) if text else {}
     except json.JSONDecodeError:
-        return {
+        result = {
             "answer": "I had trouble forming a response. Could you rephrase that?",
             "actions": [],
         }
+        _lf_ctx.update_current_observation(output=result, level="WARNING")
+        return result
 
     if not isinstance(data, dict):
         data = {}
@@ -215,4 +275,27 @@ def run_agent(
     answer = data.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         answer = "Done."
+
+    # Track token usage + output for both Langfuse and Sentry.
+    usage = getattr(resp, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", 0)
+    output_tokens = getattr(usage, "output_tokens", 0)
+    action_types = [a.get("type") for a in actions if isinstance(a, dict)]
+
+    _lf_ctx.update_current_observation(
+        output={"answer": answer, "action_types": action_types},
+        usage={"input": input_tokens, "output": output_tokens},
+    )
+    sentry_sdk.add_breadcrumb(
+        category="agent",
+        message="agent call completed",
+        data={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "action_count": len(actions),
+            "action_types": action_types,
+        },
+        level="info",
+    )
+
     return {"answer": answer, "actions": actions}

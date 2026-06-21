@@ -8,6 +8,7 @@
  * real-time.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as Sentry from '@sentry/react';
 import { apiClient } from '../api/client';
 import type { AgentAction, AgentTurn } from '../api/types';
 import type { SplatViewerHandle } from './SplatViewerReact';
@@ -133,6 +134,15 @@ export function AgentChat({ viewerRef }: Props) {
     setMessages((m) => [...m, { role: 'user', text }]);
     setBusy(true);
 
+    const span = Sentry.startInactiveSpan({
+      name: 'agent.act',
+      op: 'ai.agent',
+      attributes: {
+        'agent.message_length': text.length,
+        'agent.history_turns': messages.length,
+      },
+    });
+
     try {
       const screenshot = v.capture();
       const screenshot_b64 = screenshot.split(',')[1];
@@ -149,9 +159,21 @@ export function AgentChat({ viewerRef }: Props) {
         history,
       });
 
+      span.setAttribute('agent.action_count', res.actions.length);
+      span.setAttribute(
+        'agent.action_types',
+        res.actions.map((a) => a.type).join(','),
+      );
+      span.setStatus({ code: 1 }); // OK
+
       setMessages((m) => [...m, { role: 'assistant', text: res.answer }]);
       executeActions(v, res.actions);
     } catch (err) {
+      span.setStatus({ code: 2, message: err instanceof Error ? err.message : 'error' });
+      Sentry.captureException(err, {
+        tags: { source: 'agent_chat' },
+        extra: { message_preview: text.slice(0, 200) },
+      });
       setMessages((m) => [
         ...m,
         {
@@ -160,6 +182,7 @@ export function AgentChat({ viewerRef }: Props) {
         },
       ]);
     } finally {
+      span.end();
       setBusy(false);
     }
   }, [busy, messages, viewerRef]);

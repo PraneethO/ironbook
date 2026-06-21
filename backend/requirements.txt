@@ -8,4 +8,6 @@ onnxruntime>=1.22,<2          # on-device monocular-depth reconstruction (CPU/Co
 httpx>=0.28,<0.29
 anthropic>=0.69                # reasoning navigation agent (Claude vision + tool use)
 python-dotenv>=1.0,<2          # load backend/.env (ANTHROPIC_API_KEY etc.)
+sentry-sdk[fastapi]>=2.0,<3    # error tracking + performance + AI monitoring
+langfuse>=3.0,<4               # LLM observability (prompt traces, token usage, scoring)
 pytest>=9,<10

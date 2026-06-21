@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@deepgram/sdk": "^5.4.0",
+    "@sentry/react": "^8",
     "heic2any": "^0.0.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
