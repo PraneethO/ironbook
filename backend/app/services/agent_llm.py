@@ -166,136 +166,186 @@ def run_agent(
 ) -> Dict[str, Any]:
     """Return {"answer": str, "actions": [..]}. Never raises for normal errors."""
     sentry_sdk.set_tag("agent.model", config.AGENT_MODEL)
-    sentry_sdk.add_breadcrumb(
-        category="agent",
-        message="agent call started",
-        data={
-            "message_preview": message[:200],
-            "has_screenshot": bool(screenshot_b64),
-            "camera_mode": camera.get("mode"),
-            "history_turns": len(history),
-        },
-        level="info",
-    )
-    _lf_ctx.update_current_trace(
-        tags=["navigation", "vision-grounded"],
-        metadata={"model": config.AGENT_MODEL},
-    )
-    _lf_ctx.update_current_observation(
-        input={
-            "message": message,
-            "has_screenshot": bool(screenshot_b64),
-            "camera_mode": camera.get("mode"),
-            "history_turns": len(history),
-        },
-        model=config.AGENT_MODEL,
-    )
 
-    if _client is None:
-        result: Dict[str, Any] = {
-            "answer": (
-                "The navigation agent isn't configured yet — set ANTHROPIC_API_KEY "
-                "in backend/.env and restart the server."
-            ),
-            "actions": [],
-        }
-        _lf_ctx.update_current_observation(output=result, level="WARNING")
-        return result
+    with sentry_sdk.start_span(op="ai.pipeline", name="ironbook.agent.act") as pipeline_span:
+        pipeline_span.set_attribute("gen_ai.request.model", config.AGENT_MODEL)
+        pipeline_span.set_attribute("ai.has_screenshot", bool(screenshot_b64))
+        pipeline_span.set_attribute("ai.message_length", len(message))
+        pipeline_span.set_attribute("ai.history_turns", len(history))
+        pipeline_span.set_attribute("ai.camera_mode", camera.get("mode", "unknown"))
 
-    user_content: List[Dict[str, Any]] = []
-    if screenshot_b64:
-        user_content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": screenshot_b64,
-                },
-            }
-        )
-    cam_note = (
-        f"Camera mode={camera.get('mode')} fov_rad={camera.get('fov')}. "
-        "The scene is roughly centered at the origin, Y is up."
-    )
-    user_content.append({"type": "text", "text": f"{cam_note}\n\nUser: {message}"})
-
-    messages = _history_to_messages(history) + [
-        {"role": "user", "content": user_content}
-    ]
-
-    try:
-        resp = _client.messages.create(
-            model=config.AGENT_MODEL,
-            max_tokens=2048,
-            thinking={"type": "adaptive"},
-            system=SYSTEM_PROMPT,
-            output_config={
-                "format": {"type": "json_schema", "schema": ACTIONS_SCHEMA}
+        sentry_sdk.add_breadcrumb(
+            category="agent",
+            message="agent pipeline started",
+            data={
+                "message_preview": message[:200],
+                "has_screenshot": bool(screenshot_b64),
+                "camera_mode": camera.get("mode"),
+                "history_turns": len(history),
             },
-            messages=messages,
+            level="info",
         )
-    except Exception as exc:  # network / API errors -> friendly fallback
-        sentry_sdk.capture_exception(exc)
+
+        _lf_ctx.update_current_trace(
+            tags=["navigation", "vision-grounded"],
+            metadata={"model": config.AGENT_MODEL},
+        )
         _lf_ctx.update_current_observation(
-            output={"error": str(exc)},
-            level="ERROR",
-            status_message=str(exc),
+            input={
+                "message": message,
+                "has_screenshot": bool(screenshot_b64),
+                "camera_mode": camera.get("mode"),
+                "history_turns": len(history),
+            },
+            model=config.AGENT_MODEL,
         )
-        return {
-            "answer": f"Sorry, the agent hit an error talking to the model: {exc}",
-            "actions": [],
-        }
 
-    if getattr(resp, "stop_reason", None) == "refusal":
-        result = {"answer": "I can't help with that request.", "actions": []}
-        _lf_ctx.update_current_observation(output=result, level="WARNING")
-        return result
+        if _client is None:
+            pipeline_span.set_attribute("ai.skipped", True)
+            result: Dict[str, Any] = {
+                "answer": (
+                    "The navigation agent isn't configured yet — set ANTHROPIC_API_KEY "
+                    "in backend/.env and restart the server."
+                ),
+                "actions": [],
+            }
+            _lf_ctx.update_current_observation(output=result, level="WARNING")
+            return result
 
-    text = ""
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            text = block.text
-            break
-    try:
-        data = json.loads(text) if text else {}
-    except json.JSONDecodeError:
-        result = {
-            "answer": "I had trouble forming a response. Could you rephrase that?",
-            "actions": [],
-        }
-        _lf_ctx.update_current_observation(output=result, level="WARNING")
-        return result
+        # ── Phase 1: build context ────────────────────────────────────────────
+        with sentry_sdk.start_span(op="ai.prepare_input", name="build_context") as prep_span:
+            user_content: List[Dict[str, Any]] = []
+            if screenshot_b64:
+                user_content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": screenshot_b64,
+                        },
+                    }
+                )
+                prep_span.set_attribute("ai.screenshot_bytes", len(screenshot_b64))
 
-    if not isinstance(data, dict):
-        data = {}
-    actions = data.get("actions")
-    if not isinstance(actions, list):
-        actions = []
-    answer = data.get("answer")
-    if not isinstance(answer, str) or not answer.strip():
-        answer = "Done."
+            cam_note = (
+                f"Camera mode={camera.get('mode')} fov_rad={camera.get('fov')}. "
+                "The scene is roughly centered at the origin, Y is up."
+            )
+            user_content.append({"type": "text", "text": f"{cam_note}\n\nUser: {message}"})
 
-    # Track token usage + output for both Langfuse and Sentry.
-    usage = getattr(resp, "usage", None)
-    input_tokens = getattr(usage, "input_tokens", 0)
-    output_tokens = getattr(usage, "output_tokens", 0)
-    action_types = [a.get("type") for a in actions if isinstance(a, dict)]
+            messages = _history_to_messages(history) + [
+                {"role": "user", "content": user_content}
+            ]
+            prep_span.set_attribute("ai.context_turns", len(messages))
 
-    _lf_ctx.update_current_observation(
-        output={"answer": answer, "action_types": action_types},
-        usage={"input": input_tokens, "output": output_tokens},
-    )
-    sentry_sdk.add_breadcrumb(
-        category="agent",
-        message="agent call completed",
-        data={
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "action_count": len(actions),
-            "action_types": action_types,
-        },
-        level="info",
-    )
+        # ── Phase 2: call Claude (AnthropicIntegration auto-spans this) ───────
+        try:
+            resp = _client.messages.create(
+                model=config.AGENT_MODEL,
+                max_tokens=2048,
+                thinking={"type": "adaptive"},
+                system=SYSTEM_PROMPT,
+                output_config={
+                    "format": {"type": "json_schema", "schema": ACTIONS_SCHEMA}
+                },
+                messages=messages,
+            )
+        except Exception as exc:
+            pipeline_span.set_status({"code": 2, "message": str(exc)})
+            sentry_sdk.capture_exception(exc)
+            _lf_ctx.update_current_observation(
+                output={"error": str(exc)},
+                level="ERROR",
+                status_message=str(exc),
+            )
+            return {
+                "answer": f"Sorry, the agent hit an error talking to the model: {exc}",
+                "actions": [],
+            }
 
-    return {"answer": answer, "actions": actions}
+        if getattr(resp, "stop_reason", None) == "refusal":
+            pipeline_span.set_attribute("ai.refusal", True)
+            result = {"answer": "I can't help with that request.", "actions": []}
+            _lf_ctx.update_current_observation(output=result, level="WARNING")
+            return result
+
+        # ── Phase 3: parse response + extract actions ─────────────────────────
+        with sentry_sdk.start_span(op="ai.parse_output", name="extract_actions") as parse_span:
+            text = ""
+            for block in resp.content:
+                if getattr(block, "type", None) == "text":
+                    text = block.text
+                    break
+
+            try:
+                data = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                parse_span.set_attribute("ai.parse_error", True)
+                result = {
+                    "answer": "I had trouble forming a response. Could you rephrase that?",
+                    "actions": [],
+                }
+                _lf_ctx.update_current_observation(output=result, level="WARNING")
+                return result
+
+            if not isinstance(data, dict):
+                data = {}
+            actions = data.get("actions")
+            if not isinstance(actions, list):
+                actions = []
+            answer = data.get("answer")
+            if not isinstance(answer, str) or not answer.strip():
+                answer = "Done."
+
+            action_types = [a.get("type") for a in actions if isinstance(a, dict)]
+            parse_span.set_attribute("ai.action_count", len(actions))
+            parse_span.set_attribute("ai.action_types", ",".join(t for t in action_types if t))
+
+        # ── Token usage + final span attributes ───────────────────────────────
+        usage = getattr(resp, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", 0)
+        output_tokens = getattr(usage, "output_tokens", 0)
+        cache_read = getattr(usage, "cache_read_input_tokens", 0)
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0)
+
+        pipeline_span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+        pipeline_span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+        pipeline_span.set_attribute("gen_ai.usage.cache_read_tokens", cache_read)
+        pipeline_span.set_attribute("gen_ai.usage.cache_write_tokens", cache_write)
+        pipeline_span.set_attribute("ai.action_count", len(actions))
+        pipeline_span.set_attribute("ai.action_types", ",".join(t for t in action_types if t))
+
+        # Measurements show up as performance metrics in Sentry charts.
+        sentry_sdk.set_measurement("agent.input_tokens", input_tokens, "none")
+        sentry_sdk.set_measurement("agent.output_tokens", output_tokens, "none")
+        sentry_sdk.set_measurement("agent.action_count", len(actions), "none")
+
+        # One breadcrumb per executed action so the trace tells the full story.
+        for action in actions:
+            if isinstance(action, dict):
+                sentry_sdk.add_breadcrumb(
+                    category="agent.action",
+                    message=f"action dispatched: {action.get('type')}",
+                    data={k: v for k, v in action.items() if k != "target_2d"},
+                    level="info",
+                )
+
+        _lf_ctx.update_current_observation(
+            output={"answer": answer, "action_types": action_types},
+            usage={"input": input_tokens, "output": output_tokens},
+        )
+        sentry_sdk.add_breadcrumb(
+            category="agent",
+            message="agent pipeline completed",
+            data={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read,
+                "action_count": len(actions),
+                "action_types": action_types,
+            },
+            level="info",
+        )
+
+        return {"answer": answer, "actions": actions}

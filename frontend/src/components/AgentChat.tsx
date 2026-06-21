@@ -134,23 +134,54 @@ export function AgentChat({ viewerRef }: Props) {
     setMessages((m) => [...m, { role: 'user', text }]);
     setBusy(true);
 
+    const camera = v.getCameraSnapshot();
+
     const span = Sentry.startInactiveSpan({
-      name: 'agent.act',
-      op: 'ai.agent',
+      name: 'ironbook.agent.act',
+      op: 'ai.pipeline',
       attributes: {
-        'agent.message_length': text.length,
-        'agent.history_turns': messages.length,
+        'gen_ai.request.model': 'claude-sonnet-4-6',
+        'ai.message_length': text.length,
+        'ai.history_turns': messages.length,
+        'ai.camera_mode': camera.mode,
+        'ai.splat_count': v.splatCount,
       },
     });
 
     try {
+      // Capture screenshot and measure how long it takes.
+      const screenshotStart = performance.now();
       const screenshot = v.capture();
+      const screenshotMs = Math.round(performance.now() - screenshotStart);
       const screenshot_b64 = screenshot.split(',')[1];
-      const camera = v.getCameraSnapshot();
+
+      Sentry.addBreadcrumb({
+        category: 'agent.screenshot',
+        message: 'viewer frame captured',
+        data: {
+          capture_ms: screenshotMs,
+          data_chars: screenshot_b64.length,
+          splat_count: v.splatCount,
+        },
+        level: 'info',
+      });
+      span.setAttribute('ai.screenshot_capture_ms', screenshotMs);
+
       const history: AgentTurn[] = messages.slice(-6).map((m) => ({
         role: m.role,
         text: m.text,
       }));
+
+      Sentry.addBreadcrumb({
+        category: 'agent.request',
+        message: 'sending to backend agent',
+        data: {
+          message_preview: text.slice(0, 120),
+          history_turns: history.length,
+          camera_mode: camera.mode,
+        },
+        level: 'info',
+      });
 
       const res = await apiClient.agentAct({
         message: text,
@@ -159,20 +190,45 @@ export function AgentChat({ viewerRef }: Props) {
         history,
       });
 
-      span.setAttribute('agent.action_count', res.actions.length);
-      span.setAttribute(
-        'agent.action_types',
-        res.actions.map((a) => a.type).join(','),
-      );
-      span.setStatus({ code: 1 }); // OK
+      span.setAttribute('ai.action_count', res.actions.length);
+      span.setAttribute('ai.action_types', res.actions.map((a) => a.type).join(','));
+      span.setAttribute('ai.answer_length', res.answer.length);
+      span.setStatus({ code: 1 });
+
+      Sentry.addBreadcrumb({
+        category: 'agent.response',
+        message: 'agent responded',
+        data: {
+          answer_preview: res.answer.slice(0, 120),
+          action_count: res.actions.length,
+          action_types: res.actions.map((a) => a.type),
+        },
+        level: 'info',
+      });
 
       setMessages((m) => [...m, { role: 'assistant', text: res.answer }]);
+
+      // Breadcrumb per action so the trace shows exactly what the agent did.
+      for (const action of res.actions) {
+        Sentry.addBreadcrumb({
+          category: 'agent.action',
+          message: `execute: ${action.type}`,
+          data: {
+            type: action.type,
+            ...(action.direction ? { direction: action.direction } : {}),
+            ...(action.amount != null ? { amount: action.amount } : {}),
+            ...(action.label ? { label: action.label } : {}),
+          },
+          level: 'info',
+        });
+      }
+
       executeActions(v, res.actions);
     } catch (err) {
       span.setStatus({ code: 2, message: err instanceof Error ? err.message : 'error' });
       Sentry.captureException(err, {
-        tags: { source: 'agent_chat' },
-        extra: { message_preview: text.slice(0, 200) },
+        tags: { source: 'agent_chat', camera_mode: camera.mode },
+        extra: { message_preview: text.slice(0, 200), splat_count: v.splatCount },
       });
       setMessages((m) => [
         ...m,
