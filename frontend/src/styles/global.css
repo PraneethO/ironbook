@@ -657,3 +657,73 @@ ul.guide li .ic {
 .agent-input:disabled {
   opacity: 0.5;
 }
+
+/* --- Voice button (push-to-talk) ---------------------------------------- */
+.voice-button-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.voice-btn-idle {
+  background: rgba(255,255,255,0.08);
+  border-color: var(--border);
+}
+
+.voice-btn-idle:hover:not(:disabled) {
+  background: rgba(255,255,255,0.14);
+}
+
+.voice-btn-connecting {
+  background: rgba(251,191,36,0.2);
+  border-color: var(--warn);
+}
+
+.voice-btn-listening {
+  background: rgba(248,113,113,0.25);
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(248,113,113,0.3);
+  animation: voice-pulse 1s ease-in-out infinite;
+  transform: scale(1.05);
+}
+
+.voice-btn-error {
+  background: rgba(248,113,113,0.15);
+  border-color: var(--danger);
+}
+
+@keyframes voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(248,113,113,0.3); }
+  50%       { box-shadow: 0 0 0 6px rgba(248,113,113,0.1); }
+}
+
+.voice-live-text {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  background: rgba(20, 23, 30, 0.92);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+  pointer-events: none;
+  z-index: 100;
+}

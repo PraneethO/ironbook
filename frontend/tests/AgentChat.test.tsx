@@ -12,6 +12,7 @@ import { AgentChat } from '../src/components/AgentChat';
 vi.mock('../src/api/client', () => ({
   apiClient: {
     agentAct: vi.fn(),
+    voiceConfig: vi.fn().mockResolvedValue({ deepgram_key: 'test-key', model: 'nova-2' }),
   },
 }));
 import { apiClient } from '../src/api/client';
@@ -32,6 +33,10 @@ function makeMockViewer(overrides: Record<string, unknown> = {}) {
       bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
     })),
     pickAt: vi.fn(() => [0.5, 0.5, 0] as [number, number, number]),
+    rayToSceneDepth: vi.fn(() => [0.5, 0.5, 0] as [number, number, number]),
+    setSplatScale: vi.fn(),
+    setBackgroundByName: vi.fn(),
+    setBrightness: vi.fn(),
     moveRelative: vi.fn(),
     rotateView: vi.fn(),
     zoomView: vi.fn(),
@@ -65,10 +70,15 @@ function openPanel() {
 // ---------------------------------------------------------------------------
 
 describe('AgentChat panel', () => {
-  it('renders the toggle button and opens the panel on click', () => {
+  it('renders the panel open by default and toggle closes it', () => {
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
+    // Panel is open by default
+    expect(screen.getByTestId('agent-chat')).toBeTruthy();
+    // Toggle closes it
+    openPanel();
     expect(screen.queryByTestId('agent-chat')).toBeNull();
+    // Toggle again reopens
     openPanel();
     expect(screen.getByTestId('agent-chat')).toBeTruthy();
   });
@@ -76,7 +86,7 @@ describe('AgentChat panel', () => {
   it('shows the hint message when no messages yet', () => {
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
+    // Panel is open by default — hint is visible immediately
     expect(screen.getByText(/navigate/i)).toBeTruthy();
   });
 
@@ -87,7 +97,6 @@ describe('AgentChat panel', () => {
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), {
       target: { value: 'rotate clockwise' },
@@ -106,7 +115,6 @@ describe('AgentChat panel', () => {
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'move forward' } });
     fireEvent.click(screen.getByTestId('agent-send'));
@@ -121,7 +129,6 @@ describe('AgentChat panel', () => {
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'turn right' } });
     fireEvent.click(screen.getByTestId('agent-send'));
@@ -136,7 +143,6 @@ describe('AgentChat panel', () => {
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'zoom in' } });
     fireEvent.click(screen.getByTestId('agent-send'));
@@ -144,35 +150,33 @@ describe('AgentChat panel', () => {
     await waitFor(() => expect(viewer.zoomView).toHaveBeenCalledWith('in', 1));
   });
 
-  it('calls pickAt + flyTo for a fly_to action', async () => {
+  it('calls rayToSceneDepth + flyTo for a fly_to action', async () => {
     (apiClient.agentAct as ReturnType<typeof vi.fn>).mockResolvedValue({
       answer: 'Flying to target.',
       actions: [{ type: 'fly_to', target_2d: [0.6, 0.4] }],
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'go to the fountain' } });
     fireEvent.click(screen.getByTestId('agent-send'));
 
-    await waitFor(() => expect(viewer.pickAt).toHaveBeenCalledWith(0.6, 0.4));
+    await waitFor(() => expect(viewer.rayToSceneDepth).toHaveBeenCalledWith(0.6, 0.4));
     expect(viewer.flyTo).toHaveBeenCalledWith([0.5, 0.5, 0]);
   });
 
-  it('calls pickAt + highlightAt + lookAtPoint for a highlight action', async () => {
+  it('calls rayToSceneDepth + highlightAt + lookAtPoint for a highlight action', async () => {
     (apiClient.agentAct as ReturnType<typeof vi.fn>).mockResolvedValue({
       answer: 'Highlighting.',
       actions: [{ type: 'highlight', target_2d: [0.3, 0.5], label: 'door' }],
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'highlight the door' } });
     fireEvent.click(screen.getByTestId('agent-send'));
 
-    await waitFor(() => expect(viewer.pickAt).toHaveBeenCalledWith(0.3, 0.5));
+    await waitFor(() => expect(viewer.rayToSceneDepth).toHaveBeenCalledWith(0.3, 0.5));
     expect(viewer.highlightAt).toHaveBeenCalledWith([0.5, 0.5, 0]);
     expect(viewer.lookAtPoint).toHaveBeenCalledWith([0.5, 0.5, 0]);
   });
@@ -184,7 +188,6 @@ describe('AgentChat panel', () => {
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'clear highlight' } });
     fireEvent.click(screen.getByTestId('agent-send'));
@@ -199,7 +202,6 @@ describe('AgentChat panel', () => {
     });
     const viewer = makeMockViewer();
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'reset' } });
     fireEvent.click(screen.getByTestId('agent-send'));
@@ -210,7 +212,6 @@ describe('AgentChat panel', () => {
   it('shows "Load a world first" when splatCount is 0', async () => {
     const viewer = makeMockViewer({ splatCount: 0 });
     render(<AgentChat viewerRef={makeViewerRef(viewer)} />);
-    openPanel();
 
     fireEvent.change(screen.getByTestId('agent-input'), { target: { value: 'hello' } });
     fireEvent.click(screen.getByTestId('agent-send'));

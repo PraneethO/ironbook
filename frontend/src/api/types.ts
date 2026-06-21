@@ -115,7 +115,10 @@ export type AgentActionType =
   | 'look_at'
   | 'highlight'
   | 'clear_highlight'
-  | 'reset_view';
+  | 'reset_view'
+  | 'set_splat_scale'
+  | 'set_background'
+  | 'set_brightness';
 
 export type AgentDirection =
   | 'forward'

@@ -8,7 +8,9 @@ frontend to execute against the splat viewer.
 from __future__ import annotations
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
+from .. import config
 from ..models import AgentActRequest, AgentActResponse
 from ..services import agent_llm
 
@@ -24,3 +26,14 @@ def act(req: AgentActRequest) -> AgentActResponse:
         [t.model_dump() for t in req.history],
     )
     return AgentActResponse(**result)
+
+
+class VoiceConfig(BaseModel):
+    deepgram_key: str
+    model: str = "nova-2"
+
+
+@router.get("/voice-config", response_model=VoiceConfig)
+def voice_config() -> VoiceConfig:
+    """Return the Deepgram key from server config so it never ships in the JS bundle."""
+    return VoiceConfig(deepgram_key=config.DEEPGRAM_API_KEY)

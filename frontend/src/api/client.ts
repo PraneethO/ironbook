@@ -143,6 +143,11 @@ export const apiClient = {
     });
   },
 
+  // GET /api/agent/voice-config — Deepgram key served from backend (never in bundle)
+  voiceConfig(): Promise<{ deepgram_key: string; model: string }> {
+    return jsonRequest<{ deepgram_key: string; model: string }>('/agent/voice-config');
+  },
+
   // POST /api/agent/act — reasoning navigation agent
   agentAct(body: {
     message: string;

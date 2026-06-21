@@ -51,6 +51,11 @@ Action types (return only the ones you need):
 - highlight:{"type":"highlight","target_2d":[x,y],"label":"short name"}
 - clear_highlight: {"type":"clear_highlight"}
 - reset_view: {"type":"reset_view"}
+- set_splat_scale: {"type":"set_splat_scale","amount":0.5}  (shrink splats) \
+  or {"type":"set_splat_scale","amount":2.0}  (enlarge splats)
+- set_background: {"type":"set_background","label":"black"}  (color name: \
+  black, white, navy, midnight, gray, slate, dark)
+- set_brightness: {"type":"set_brightness","amount":1.5}  (1.0=normal, >1=brighter)
 
 Rules:
 - "go to / move to / take me to X" -> if X is visible, emit `fly_to` with its target_2d. \
@@ -60,7 +65,9 @@ If X is NOT visible in the current image, do NOT guess coordinates: emit a `rota
 `highlight` on it (with target_2d), and put a concise, specific explanation in `answer`. \
 If you are unsure what an object is or does, say so plainly rather than inventing detail.
 - `answer` is ALWAYS required: one or two friendly sentences describing what you did and/or \
-the answer to the question. Never leave it empty."""
+the answer to the question. Never leave it empty.
+- If the user asks to change the appearance of the world (bigger/smaller splats, different \
+background, brighter/darker), emit the corresponding modification action."""
 
 
 # Structured-output schema. No min/max constraints (validated client-side).
@@ -88,6 +95,9 @@ ACTIONS_SCHEMA: Dict[str, Any] = {
                             "highlight",
                             "clear_highlight",
                             "reset_view",
+                            "set_splat_scale",
+                            "set_background",
+                            "set_brightness",
                         ],
                     },
                     "direction": {

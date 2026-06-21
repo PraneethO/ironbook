@@ -12,6 +12,12 @@ from typing import Optional, Tuple
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()  # enables PIL to open .heic / .heif files
+except ImportError:
+    pass  # HEIC support optional; files will fail gracefully if not installed
+
 from .. import config
 
 

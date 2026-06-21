@@ -49,6 +49,8 @@ vi.mock('../src/api/client', () => ({
   API_BASE: '/api',
   apiClient: {
     assetUrl: (id: string) => `/api/projects/${id}/asset`,
+    agentAct: vi.fn(),
+    voiceConfig: vi.fn().mockResolvedValue({ deepgram_key: 'test-key', model: 'nova-2' }),
   },
 }));
 

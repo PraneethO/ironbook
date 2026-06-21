@@ -34,6 +34,7 @@ import {
 import {
   add,
   clamp,
+  cross,
   lookAt,
   Mat4,
   multiply,
@@ -392,6 +393,46 @@ export class SplatViewer {
     return [med(xs), med(ys), med(zs)];
   }
 
+  /** Always returns a 3D point — uses pickAt if available, otherwise ray-casts
+   *  to the scene midpoint depth. Used as fallback when pickAt returns null. */
+  rayToSceneDepth(nx: number, ny: number): Vec3 {
+    // Try real pick first
+    const picked = this.pickAt(nx, ny);
+    if (picked) return picked;
+
+    // Fallback: construct a ray from the camera through the normalized screen point
+    // and return a point at the current scene distance
+    const eye = eyeForMode(this.state, this.mode);
+    const tgt = targetForMode(this.state, this.mode);
+    const w = this.canvas.width || 400;
+    const h = this.canvas.height || 300;
+    const aspect = w / h;
+
+    // Convert normalized [0,1] top-left to NDC [-1,1]
+    const ndcx = nx * 2 - 1;
+    const ndcy = -(ny * 2 - 1); // flip Y
+
+    // Unproject: compute the ray direction in world space
+    // Use the same FOV as the viewer
+    const fovHalfTan = Math.tan(DEFAULT_FOV / 2);
+    const localX = ndcx * fovHalfTan * aspect;
+    const localY = ndcy * fovHalfTan;
+
+    // Camera axes
+    const forward = normalize(sub(tgt, eye));
+    const right = normalize(cross(forward, [0, 1, 0]));
+    const up = cross(right, forward);
+
+    // Ray direction in world space
+    const rayDir = normalize(
+      add(add(scale(right, localX), scale(up, localY)), forward)
+    );
+
+    // Return point at scene distance along the ray
+    const depth = Math.max(0.5, this.state.distance * 0.6);
+    return add(eye, scale(rayDir, depth));
+  }
+
   /** Tint + glow splats within a sphere around `point`. */
   highlightAt(point: Vec3, radius?: number): void {
     this.hlCenter = point;
@@ -441,6 +482,29 @@ export class SplatViewer {
 
   setSplatScale(scale: number): void {
     this.splatScale = Math.max(0.05, scale);
+  }
+
+  /** Change the background color by CSS-like name or hex. */
+  setBackgroundByName(name: string): void {
+    const colors: Record<string, [number, number, number]> = {
+      black: [0, 0, 0],
+      white: [1, 1, 1],
+      dark: [0.04, 0.05, 0.07],
+      midnight: [0.02, 0.02, 0.08],
+      navy: [0.03, 0.06, 0.18],
+      gray: [0.15, 0.15, 0.15],
+      slate: [0.08, 0.09, 0.12],
+    };
+    const c = colors[name.toLowerCase()] ?? colors.dark;
+    this.setBackgroundColor(c[0], c[1], c[2]);
+  }
+
+  /** Multiply background and splat brightness. */
+  setBrightness(factor: number): void {
+    const f = Math.max(0.1, Math.min(3.0, factor));
+    const base = [0.04, 0.05, 0.07];
+    this.setBackgroundColor(base[0] * f, base[1] * f, base[2] * f);
+    this.setSplatScale(Math.max(0.3, Math.min(3.0, f)));
   }
 
   setBackgroundColor(r: number, g: number, b: number): void {

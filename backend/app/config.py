@@ -21,6 +21,7 @@ FRONTEND_BASE_URL = os.environ.get("GSW_FRONTEND_URL", "http://localhost:5173")
 # Reasoning navigation agent (Claude). Key is read from env / backend/.env.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-4-6")
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 
 # When set, reconstruct jobs run synchronously to completion (used by tests).
 RECONSTRUCT_INLINE = os.environ.get("RECONSTRUCT_INLINE", "0") == "1"

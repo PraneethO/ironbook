@@ -13,6 +13,7 @@ import type { AgentAction, AgentTurn } from '../api/types';
 import type { SplatViewerHandle } from './SplatViewerReact';
 import type { SplatViewer } from '../viewer/SplatViewer';
 import type { Vec3 } from '../viewer/math';
+import { VoiceButton } from './VoiceButton';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -59,31 +60,38 @@ function executeActions(viewer: SplatViewer, actions: AgentAction[]): void {
         break;
       case 'fly_to': {
         if (!action.target_2d) break;
-        const p = viewer.pickAt(action.target_2d[0], action.target_2d[1]);
-        if (p) viewer.flyTo(p as Vec3);
+        const p = viewer.rayToSceneDepth(action.target_2d[0], action.target_2d[1]);
+        viewer.flyTo(p as Vec3);
         break;
       }
       case 'look_at': {
         if (!action.target_2d) break;
-        const p = viewer.pickAt(action.target_2d[0], action.target_2d[1]);
-        if (p) viewer.lookAtPoint(p as Vec3);
+        const p = viewer.rayToSceneDepth(action.target_2d[0], action.target_2d[1]);
+        viewer.lookAtPoint(p as Vec3);
         break;
       }
       case 'highlight': {
         if (!action.target_2d) break;
-        const p = viewer.pickAt(action.target_2d[0], action.target_2d[1]);
-        if (p) {
-          viewer.highlightAt(p as Vec3);
-          viewer.lookAtPoint(p as Vec3);
-        }
+        const p = viewer.rayToSceneDepth(action.target_2d[0], action.target_2d[1]);
+        viewer.highlightAt(p as Vec3);
+        viewer.lookAtPoint(p as Vec3);
         break;
       }
+      case 'set_splat_scale':
+        viewer.setSplatScale(action.amount ?? 1.0);
+        break;
+      case 'set_background':
+        viewer.setBackgroundByName(action.label ?? 'dark');
+        break;
+      case 'set_brightness':
+        viewer.setBrightness(action.amount ?? 1.0);
+        break;
     }
   }
 }
 
 export function AgentChat({ viewerRef }: Props) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true); // open by default
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -108,9 +116,9 @@ export function AgentChat({ viewerRef }: Props) {
     }
   }, [messages]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || busy) return;
+  // Core dispatch — works for both text input and voice transcript.
+  const sendText = useCallback(async (text: string) => {
+    if (!text.trim() || busy) return;
     const v = viewerRef.current?.viewer;
     if (!v) return;
 
@@ -122,13 +130,12 @@ export function AgentChat({ viewerRef }: Props) {
       return;
     }
 
-    setInput('');
     setMessages((m) => [...m, { role: 'user', text }]);
     setBusy(true);
 
     try {
-      const screenshot = v.capture(); // "data:image/png;base64,XXXX"
-      const screenshot_b64 = screenshot.split(',')[1]; // strip data: prefix
+      const screenshot = v.capture();
+      const screenshot_b64 = screenshot.split(',')[1];
       const camera = v.getCameraSnapshot();
       const history: AgentTurn[] = messages.slice(-6).map((m) => ({
         role: m.role,
@@ -155,7 +162,14 @@ export function AgentChat({ viewerRef }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [input, busy, messages, viewerRef]);
+  }, [busy, messages, viewerRef]);
+
+  const send = useCallback(async () => {
+    const text = input.trim();
+    if (!text) return;
+    setInput('');
+    await sendText(text);
+  }, [input, sendText]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -166,17 +180,16 @@ export function AgentChat({ viewerRef }: Props) {
 
   return (
     <>
-      {/* Toggle button — always visible in the viewer */}
-      <div className="viewer-overlay bottom-right" style={{ bottom: 80 }}>
-        <button
-          className="btn agent-toggle"
-          onClick={() => setOpen((o) => !o)}
-          title="Ask the navigation agent"
-          data-testid="agent-toggle"
-        >
-          🤖 {open ? 'Close' : 'Ask'}
-        </button>
-      </div>
+      {/* Toggle button — positioned absolutely so pointer-events work */}
+      <button
+        className="btn agent-toggle"
+        style={{ position: 'absolute', bottom: 130, right: 16, zIndex: 60, pointerEvents: 'auto' }}
+        onClick={() => setOpen((o) => !o)}
+        title="Ask the navigation agent"
+        data-testid="agent-toggle"
+      >
+        🤖 {open ? 'Close' : 'Ask'}
+      </button>
 
       {open && (
         <div className="agent-chat glass" data-testid="agent-chat">
@@ -223,11 +236,15 @@ export function AgentChat({ viewerRef }: Props) {
           </div>
 
           <div className="agent-chat-input-row">
+            <VoiceButton
+              onTranscript={(text) => void sendText(text)}
+              disabled={busy}
+            />
             <input
               ref={inputRef}
               type="text"
               className="agent-input"
-              placeholder="Ask the agent…"
+              placeholder="Type or hold 🎙️ to speak…"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
