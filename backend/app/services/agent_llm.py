@@ -23,17 +23,12 @@ except Exception:  # pragma: no cover
 
 # Langfuse is optional — degrades gracefully to no-ops when not configured.
 try:
-    from langfuse.decorators import langfuse_context as _lf_ctx
-    from langfuse.decorators import observe as _lf_observe
+    from langfuse import get_client as _lf_get_client
+    from langfuse import observe as _lf_observe
     _langfuse_ok = True
 except Exception:  # pragma: no cover
     _langfuse_ok = False
-
-    class _NoopCtx:
-        def update_current_trace(self, **kw: Any) -> None: pass
-        def update_current_observation(self, **kw: Any) -> None: pass
-
-    _lf_ctx = _NoopCtx()  # type: ignore[assignment]
+    _lf_get_client = lambda: None  # type: ignore[assignment]
 
     def _lf_observe(func: Any = None, **kw: Any) -> Any:  # type: ignore[misc]
         def dec(f: Any) -> Any:
@@ -168,7 +163,7 @@ def run_agent(
     sentry_sdk.set_tag("agent.model", config.AGENT_MODEL)
     sentry_sdk.add_breadcrumb(
         category="agent",
-        message="agent call started",
+        message="agent pipeline started",
         data={
             "message_preview": message[:200],
             "has_screenshot": bool(screenshot_b64),
@@ -177,19 +172,19 @@ def run_agent(
         },
         level="info",
     )
-    _lf_ctx.update_current_trace(
-        tags=["navigation", "vision-grounded"],
-        metadata={"model": config.AGENT_MODEL},
-    )
-    _lf_ctx.update_current_observation(
-        input={
-            "message": message,
-            "has_screenshot": bool(screenshot_b64),
-            "camera_mode": camera.get("mode"),
-            "history_turns": len(history),
-        },
-        model=config.AGENT_MODEL,
-    )
+
+    _lf = _lf_get_client()
+    if _lf:
+        _lf.update_current_trace(
+            tags=["navigation", "vision-grounded"],
+            metadata={"model": config.AGENT_MODEL},
+            input={
+                "message": message,
+                "has_screenshot": bool(screenshot_b64),
+                "camera_mode": camera.get("mode"),
+                "history_turns": len(history),
+            },
+        )
 
     if _client is None:
         result: Dict[str, Any] = {
@@ -199,9 +194,11 @@ def run_agent(
             ),
             "actions": [],
         }
-        _lf_ctx.update_current_observation(output=result, level="WARNING")
+        if _lf:
+            _lf.update_current_trace(output=result)
         return result
 
+    # ── Build context ─────────────────────────────────────────────────────────
     user_content: List[Dict[str, Any]] = []
     if screenshot_b64:
         user_content.append(
@@ -219,11 +216,11 @@ def run_agent(
         "The scene is roughly centered at the origin, Y is up."
     )
     user_content.append({"type": "text", "text": f"{cam_note}\n\nUser: {message}"})
-
     messages = _history_to_messages(history) + [
         {"role": "user", "content": user_content}
     ]
 
+    # ── Call Claude ───────────────────────────────────────────────────────────
     try:
         resp = _client.messages.create(
             model=config.AGENT_MODEL,
@@ -235,13 +232,10 @@ def run_agent(
             },
             messages=messages,
         )
-    except Exception as exc:  # network / API errors -> friendly fallback
+    except Exception as exc:
         sentry_sdk.capture_exception(exc)
-        _lf_ctx.update_current_observation(
-            output={"error": str(exc)},
-            level="ERROR",
-            status_message=str(exc),
-        )
+        if _lf:
+            _lf.update_current_trace(output={"error": str(exc)})
         return {
             "answer": f"Sorry, the agent hit an error talking to the model: {exc}",
             "actions": [],
@@ -249,9 +243,11 @@ def run_agent(
 
     if getattr(resp, "stop_reason", None) == "refusal":
         result = {"answer": "I can't help with that request.", "actions": []}
-        _lf_ctx.update_current_observation(output=result, level="WARNING")
+        if _lf:
+            _lf.update_current_trace(output=result)
         return result
 
+    # ── Parse response ────────────────────────────────────────────────────────
     text = ""
     for block in resp.content:
         if getattr(block, "type", None) == "text":
@@ -264,7 +260,8 @@ def run_agent(
             "answer": "I had trouble forming a response. Could you rephrase that?",
             "actions": [],
         }
-        _lf_ctx.update_current_observation(output=result, level="WARNING")
+        if _lf:
+            _lf.update_current_trace(output=result)
         return result
 
     if not isinstance(data, dict):
@@ -275,27 +272,54 @@ def run_agent(
     answer = data.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         answer = "Done."
+    action_types = [a.get("type") for a in actions if isinstance(a, dict)]
 
-    # Track token usage + output for both Langfuse and Sentry.
+    # ── Token usage ───────────────────────────────────────────────────────────
     usage = getattr(resp, "usage", None)
     input_tokens = getattr(usage, "input_tokens", 0)
     output_tokens = getattr(usage, "output_tokens", 0)
-    action_types = [a.get("type") for a in actions if isinstance(a, dict)]
+    cache_read = getattr(usage, "cache_read_input_tokens", 0)
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0)
 
-    _lf_ctx.update_current_observation(
-        output={"answer": answer, "action_types": action_types},
-        usage={"input": input_tokens, "output": output_tokens},
-    )
+    # Sentry: measurements surface in the Performance dashboard charts.
+    sentry_sdk.set_measurement("agent.input_tokens", input_tokens, "none")
+    sentry_sdk.set_measurement("agent.output_tokens", output_tokens, "none")
+    sentry_sdk.set_measurement("agent.action_count", len(actions), "none")
+
+    for action in actions:
+        if isinstance(action, dict):
+            sentry_sdk.add_breadcrumb(
+                category="agent.action",
+                message=f"action dispatched: {action.get('type')}",
+                data={k: v for k, v in action.items() if k != "target_2d"},
+                level="info",
+            )
+
     sentry_sdk.add_breadcrumb(
         category="agent",
-        message="agent call completed",
+        message="agent pipeline completed",
         data={
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read,
             "action_count": len(actions),
             "action_types": action_types,
         },
         level="info",
     )
+
+    # Langfuse: full prompt/response/token trace.
+    if _lf:
+        _lf.update_current_trace(
+            output={"answer": answer, "action_types": action_types},
+            metadata={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "action_count": len(actions),
+                "model": config.AGENT_MODEL,
+            },
+        )
 
     return {"answer": answer, "actions": actions}

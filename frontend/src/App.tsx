@@ -12,6 +12,7 @@ import { ViewerPage } from './pages/ViewerPage';
 import { SceneSettings } from './pages/SceneSettings';
 import { ExportShare } from './pages/ExportShare';
 import { AddPhotos } from './pages/AddPhotos';
+import { SentryDebug } from './pages/SentryDebug';
 
 function TopBar() {
   return (
@@ -81,6 +82,7 @@ export function App() {
             <Route path="/projects/:id/processing" element={<Processing />} />
             <Route path="/projects/:id/settings" element={<SceneSettings />} />
             <Route path="/projects/:id/share" element={<ExportShare />} />
+            <Route path="/debug/sentry" element={<SentryDebug />} />
             <Route path="*" element={<Dashboard />} />
           </Routes>
         </Sentry.ErrorBoundary>
