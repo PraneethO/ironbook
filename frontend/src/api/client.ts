@@ -155,6 +155,11 @@ export const apiClient = {
     });
   },
 
+  // POST /api/projects/demo — create/reuse the built-in demo bike scene (no file)
+  loadDemo(): Promise<Project> {
+    return jsonRequest<Project>('/projects/demo', { method: 'POST' });
+  },
+
   // GET /api/agent/voice-config — Deepgram key served from backend (never in bundle)
   voiceConfig(): Promise<{ deepgram_key: string; model: string }> {
     return jsonRequest<{ deepgram_key: string; model: string }>('/agent/voice-config');

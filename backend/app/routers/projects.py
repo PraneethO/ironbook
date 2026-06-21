@@ -1,6 +1,7 @@
 """Project CRUD + upload + reconstruct + asset endpoints (CONTRACT.md §2)."""
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -122,6 +123,40 @@ async def upload_splat(
     record["status"] = "ready"
     record["has_asset"] = True
     record["photo_count"] = 0
+    store.save_project(record)
+    return _public(record)
+
+
+# --- Built-in demo scene (bundled with the app, no upload needed) ----------
+
+# Trained Gaussian-splat scene shipped with the backend (app/assets/).
+_DEMO_ASSET = Path(__file__).resolve().parents[1] / "assets" / "demo_bike.splat"
+
+
+@router.post("/demo", response_model=Project, status_code=201)
+async def create_demo() -> Project:
+    """Create (or reuse) the built-in demo project from the bundled bike scene.
+
+    Lets anyone preview a real trained Gaussian-splat world with one click — the
+    asset ships with the app, so no file upload or reconstruction is needed.
+    """
+    if not _DEMO_ASSET.exists():
+        raise HTTPException(status_code=404, detail="The demo scene isn't available.")
+
+    # Reuse an existing demo project so repeated clicks don't pile up.
+    for rec in store.list_projects():
+        if rec.get("is_demo") and (store.project_dir(rec["id"]) / "asset.splat").exists():
+            return _public(rec)
+
+    record = store.create_project("Demo Bike")
+    pid = record["id"]
+    shutil.copyfile(_DEMO_ASSET, store.project_dir(pid) / "asset.splat")
+
+    record = store.load_project(pid) or record
+    record["status"] = "ready"
+    record["has_asset"] = True
+    record["photo_count"] = 0
+    record["is_demo"] = True
     store.save_project(record)
     return _public(record)
 

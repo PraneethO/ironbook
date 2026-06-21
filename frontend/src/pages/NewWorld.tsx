@@ -34,6 +34,7 @@ export function NewWorld() {
 
   const [name, setName] = useState('My 3D World');
   const [splatUploading, setSplatUploading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
   const splatInputRef = useRef<HTMLInputElement | null>(null);
   const [projectId, setProjectId] = useState<string | null>(existingId);
   const [files, setFiles] = useState<File[]>([]);
@@ -64,6 +65,18 @@ export function NewWorld() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not upload that file.');
       setSplatUploading(false);
+    }
+  };
+
+  const onLoadDemo = async () => {
+    setDemoLoading(true);
+    setError(null);
+    try {
+      const proj = await apiClient.loadDemo();
+      navigate(`/projects/${proj.id}/viewer`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the demo scene.');
+      setDemoLoading(false);
     }
   };
 
@@ -356,6 +369,18 @@ export function NewWorld() {
           data-testid="upload-splat-btn"
         >
           {splatUploading ? 'Uploading…' : '📦 Upload .splat / .ply'}
+        </button>
+
+        <p className="muted" style={{ margin: '16px 0 8px' }}>
+          Just want to see it in action? Load a real built-in scene — no file needed:
+        </p>
+        <button
+          className="btn"
+          disabled={demoLoading}
+          onClick={onLoadDemo}
+          data-testid="load-demo-btn"
+        >
+          {demoLoading ? 'Loading demo…' : '🚲 See the demo bike'}
         </button>
       </div>
     </div>
