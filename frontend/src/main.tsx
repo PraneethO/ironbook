@@ -9,6 +9,7 @@ const sentryDsn = import.meta.env.VITE_SENTRY_DSN as string | undefined;
 
 Sentry.init({
   dsn: sentryDsn,
+  release: (import.meta.env.VITE_APP_VERSION as string | undefined) ?? '0.1.0',
   integrations: [
     Sentry.reactRouterV6BrowserTracingIntegration({
       useEffect: React.useEffect,

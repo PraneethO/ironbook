@@ -25,7 +25,7 @@ print("\n[2/6] Create projects (15x)")
 for i in range(15):
     name = f"Smoke Test World {i+1}"
     r = client.post(f"{BASE}/projects", json={"name": name})
-    if r.status_code == 200:
+    if r.status_code in (200, 201):
         pid = r.json()["id"]
         created_ids.append(pid)
         log(f"POST /projects → {r.status_code}  id={pid[:8]}…")
@@ -90,6 +90,11 @@ for pid in (created_ids[:5] if created_ids else []):
     r = client.post(f"{BASE}/projects/{pid}/reconstruct")
     log(f"POST /projects/{pid[:8]}…/reconstruct → {r.status_code}  status={r.json().get('status')}")
 
+# ── 7. Trigger a real 500 error so Sentry captures an exception event ────────
+print("\n[7/7] Intentional 500 (debug error endpoint)")
+r = client.get(f"{BASE}/debug/error")
+log(f"GET /debug/error → {r.status_code}  (expect 500 — captured by Sentry)")
+
 # ── Flush Sentry before exiting ──────────────────────────────────────────────
 print("\nFlushing Sentry events…")
 try:
@@ -99,5 +104,5 @@ try:
 except Exception as e:
     print(f"(flush skipped: {e})")
 
-print(f"\nDone. Fired calls across 6 endpoint groups.")
+print(f"\nDone. Fired calls across 7 endpoint groups.")
 print("Check: https://praneeth-otthi.sentry.io/performance/")

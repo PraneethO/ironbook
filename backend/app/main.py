@@ -35,6 +35,7 @@ if config.SENTRY_DSN:
         integrations=_sentry_integrations,
         traces_sample_rate=1.0,
         send_default_pii=True,
+        release=os.environ.get("IRONBOOK_VERSION", "0.1.0"),
         environment=os.environ.get("ENVIRONMENT", "development"),
     )
 
