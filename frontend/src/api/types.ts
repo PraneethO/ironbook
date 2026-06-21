@@ -142,6 +142,7 @@ export interface AgentAction {
 
 export interface AgentActResponse {
   answer: string;
+  diagram?: string;
   actions: AgentAction[];
 }
 

@@ -178,7 +178,7 @@ export const apiClient = {
     return jsonRequest<{ deepgram_key: string; model: string }>('/agent/voice-config');
   },
 
-  // POST /api/agent/act — reasoning navigation agent
+  // POST /api/agent/act — reasoning navigation agent (non-streaming)
   agentAct(body: {
     message: string;
     screenshot_b64?: string;
@@ -190,6 +190,74 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+  },
+
+  // POST /api/agent/act/stream — streaming SSE variant
+  async agentActStream(params: {
+    message: string;
+    screenshot_b64?: string;
+    camera: CameraSnapshot;
+    history: AgentTurn[];
+    onDelta: (delta: string) => void;
+    onDone: (result: { answer: string; actions: AgentAction[]; diagram: string }) => void;
+  }): Promise<void> {
+    Sentry.addBreadcrumb({
+      category: 'api',
+      message: 'POST /agent/act/stream',
+      level: 'info',
+      type: 'http',
+    });
+    const res = await fetch(`${API_BASE}/agent/act/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: params.message,
+        screenshot_b64: params.screenshot_b64,
+        camera: params.camera,
+        history: params.history,
+      }),
+    });
+    if (!res.ok) await parseError(res);
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          try {
+            const data = JSON.parse(raw) as {
+              type: string;
+              delta?: string;
+              answer?: string;
+              actions?: AgentAction[];
+              diagram?: string;
+            };
+            if (data.type === 'text' && data.delta) {
+              params.onDelta(data.delta);
+            } else if (data.type === 'done') {
+              params.onDone({
+                answer: data.answer ?? '',
+                actions: data.actions ?? [],
+                diagram: data.diagram ?? '',
+              });
+            }
+          } catch {
+            // skip malformed SSE event
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   },
 };
 

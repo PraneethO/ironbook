@@ -286,12 +286,13 @@ export class SplatViewer {
     this.anim = null;
   }
 
-  /** Dolly / zoom. in = closer. */
+  /** Dolly / zoom. in = closer. Animates smoothly. */
   zoomView(dir: 'in' | 'out', amount = 1): void {
     const a = (dir === 'in' ? 1 : -1) * clampAmount(amount) * 0.6;
-    if (this.mode === 'orbit') applyZoom(this.state, this.mode, a);
-    else applyZoom(this.state, this.mode, a * this.sceneDist());
-    this.anim = null;
+    const to = cloneState(this.state);
+    if (this.mode === 'orbit') applyZoom(to, this.mode, a);
+    else applyZoom(to, this.mode, a * this.sceneDist());
+    this.startAnim(to, 350);
   }
 
   /** Smoothly turn toward + approach a 3D point so it's centered and framed. */

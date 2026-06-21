@@ -10,7 +10,8 @@ Model + key come from ``config`` (``backend/.env``).
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import sentry_sdk
 
@@ -42,7 +43,14 @@ def _make_client():
     return anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
 
+def _make_async_client():
+    if anthropic is None or not config.ANTHROPIC_API_KEY:
+        return None
+    return anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+
+
 _client = _make_client()
+_async_client = _make_async_client()
 
 
 SYSTEM_PROMPT = """You are a navigation + reasoning agent embedded in a real-time 3D \
@@ -83,16 +91,22 @@ If you are unsure what an object is or does, say so plainly rather than inventin
 - `answer` is ALWAYS required: one or two friendly sentences describing what you did and/or \
 the answer to the question. Never leave it empty.
 - If the user asks to change the appearance of the world (bigger/smaller splats, different \
-background, brighter/darker), emit the corresponding modification action."""
+background, brighter/darker), emit the corresponding modification action.
+- When you emit a `fly_to`, `look_at`, or `highlight` action for a specific object, set \
+`diagram` to a compact ASCII/Unicode schematic (≤10 lines, ≤24 chars wide) that \
+illustrates the object's structure using box-drawing characters (─ │ ┌ ┐ └ ┘ ╔ ╗ ╚ ╝ ═ ║). \
+Label key sub-parts inline. Keep it minimal and readable. \
+For any response where no object is being focused, set `diagram` to ""."""
 
 
 # Structured-output schema. No min/max constraints (validated client-side).
 ACTIONS_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["answer", "actions"],
+    "required": ["answer", "diagram", "actions"],
     "properties": {
         "answer": {"type": "string"},
+        "diagram": {"type": "string"},
         "actions": {
             "type": "array",
             "items": {
@@ -152,6 +166,39 @@ def _history_to_messages(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _build_user_content(
+    screenshot_b64: Optional[str],
+    message: str,
+    camera: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    content: List[Dict[str, Any]] = []
+    if screenshot_b64:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": screenshot_b64,
+            },
+        })
+    cam_note = (
+        f"Camera mode={camera.get('mode')} fov_rad={camera.get('fov')}. "
+        "The scene is roughly centered at the origin, Y is up."
+    )
+    content.append({"type": "text", "text": f"{cam_note}\n\nUser: {message}"})
+    return content
+
+
+def _extract_partial_answer(partial_json: str) -> str:
+    """Pull the answer string out of an incomplete JSON as it streams in."""
+    m = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)', partial_json)
+    if not m:
+        return ""
+    s = m.group(1)
+    s = s.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\").replace("\\t", "\t")
+    return s
+
+
 @_lf_observe(name="agent-act")
 def run_agent(
     message: str,
@@ -199,23 +246,7 @@ def run_agent(
         return result
 
     # ── Build context ─────────────────────────────────────────────────────────
-    user_content: List[Dict[str, Any]] = []
-    if screenshot_b64:
-        user_content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": screenshot_b64,
-                },
-            }
-        )
-    cam_note = (
-        f"Camera mode={camera.get('mode')} fov_rad={camera.get('fov')}. "
-        "The scene is roughly centered at the origin, Y is up."
-    )
-    user_content.append({"type": "text", "text": f"{cam_note}\n\nUser: {message}"})
+    user_content = _build_user_content(screenshot_b64, message, camera)
     messages = _history_to_messages(history) + [
         {"role": "user", "content": user_content}
     ]
@@ -272,6 +303,7 @@ def run_agent(
     answer = data.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         answer = "Done."
+    diagram = data.get("diagram") if isinstance(data.get("diagram"), str) else ""
     action_types = [a.get("type") for a in actions if isinstance(a, dict)]
 
     # ── Token usage ───────────────────────────────────────────────────────────
@@ -322,4 +354,65 @@ def run_agent(
             },
         )
 
-    return {"answer": answer, "actions": actions}
+    return {"answer": answer, "diagram": diagram, "actions": actions}
+
+
+async def stream_agent(
+    message: str,
+    screenshot_b64: Optional[str],
+    camera: Dict[str, Any],
+    history: List[Dict[str, str]],
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Async generator yielding SSE-style dicts: {type:'text',delta:str} then {type:'done',...}."""
+    if _async_client is None:
+        yield {
+            "type": "done",
+            "answer": "Navigation agent not configured. Set ANTHROPIC_API_KEY in backend/.env.",
+            "diagram": "",
+            "actions": [],
+        }
+        return
+
+    user_content = _build_user_content(screenshot_b64, message, camera)
+    messages_list = _history_to_messages(history) + [{"role": "user", "content": user_content}]
+
+    accumulated = ""
+    last_answer = ""
+
+    try:
+        async with _async_client.messages.stream(
+            model=config.AGENT_MODEL,
+            max_tokens=2048,
+            thinking={"type": "adaptive"},
+            system=SYSTEM_PROMPT,
+            output_config={"format": {"type": "json_schema", "schema": ACTIONS_SCHEMA}},
+            messages=messages_list,
+        ) as stream:
+            async for text_chunk in stream.text_stream:
+                accumulated += text_chunk
+                partial = _extract_partial_answer(accumulated)
+                if len(partial) > len(last_answer):
+                    delta = partial[len(last_answer):]
+                    yield {"type": "text", "delta": delta}
+                    last_answer = partial
+    except Exception as exc:
+        sentry_sdk.capture_exception(exc)
+        yield {
+            "type": "done",
+            "answer": f"Sorry, the agent hit an error: {exc}",
+            "diagram": "",
+            "actions": [],
+        }
+        return
+
+    try:
+        data = json.loads(accumulated) if accumulated else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    answer = data.get("answer") if isinstance(data.get("answer"), str) else ""
+    answer = answer.strip() or last_answer or "Done."
+    diagram = data.get("diagram") if isinstance(data.get("diagram"), str) else ""
+    actions = data.get("actions") if isinstance(data.get("actions"), list) else []
+
+    yield {"type": "done", "answer": answer, "diagram": diagram, "actions": actions}

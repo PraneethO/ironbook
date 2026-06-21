@@ -117,4 +117,5 @@ class AgentAction(BaseModel):
 
 class AgentActResponse(BaseModel):
     answer: str
+    diagram: str = ""
     actions: List[AgentAction] = Field(default_factory=list)

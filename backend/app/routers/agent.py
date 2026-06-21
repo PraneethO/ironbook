@@ -1,13 +1,14 @@
 """Reasoning navigation agent endpoint (CONTRACT extension).
 
-POST /api/agent/act  — given the user's message + current viewer screenshot +
-camera, returns a friendly `answer` and a list of `actions` (move / rotate /
-zoom / fly_to / look_at / highlight / clear_highlight / reset_view) for the
-frontend to execute against the splat viewer.
+POST /api/agent/act        — returns a complete {answer, diagram, actions} JSON.
+POST /api/agent/act/stream — SSE stream: text deltas then a final done event.
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import config
@@ -26,6 +27,24 @@ def act(req: AgentActRequest) -> AgentActResponse:
         [t.model_dump() for t in req.history],
     )
     return AgentActResponse(**result)
+
+
+@router.post("/act/stream")
+async def act_stream(req: AgentActRequest) -> StreamingResponse:
+    async def generate():
+        async for event in agent_llm.stream_agent(
+            req.message,
+            req.screenshot_b64,
+            req.camera.model_dump(),
+            [t.model_dump() for t in req.history],
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 class VoiceConfig(BaseModel):

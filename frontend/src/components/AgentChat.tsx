@@ -97,6 +97,8 @@ export function AgentChat({ viewerRef }: Props) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [animating, setAnimating] = useState(false);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [diagram, setDiagram] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -132,7 +134,9 @@ export function AgentChat({ viewerRef }: Props) {
     }
 
     setMessages((m) => [...m, { role: 'user', text }]);
+    setDiagram(null);
     setBusy(true);
+    setStreamingText('');
 
     const camera = v.getCameraSnapshot();
 
@@ -149,81 +153,70 @@ export function AgentChat({ viewerRef }: Props) {
     });
 
     try {
-      // Capture screenshot and measure how long it takes.
       const screenshotStart = performance.now();
       const screenshot = v.capture();
       const screenshotMs = Math.round(performance.now() - screenshotStart);
       const screenshot_b64 = screenshot.split(',')[1];
 
+      span.setAttribute('ai.screenshot_capture_ms', screenshotMs);
       Sentry.addBreadcrumb({
         category: 'agent.screenshot',
         message: 'viewer frame captured',
-        data: {
-          capture_ms: screenshotMs,
-          data_chars: screenshot_b64.length,
-          splat_count: v.splatCount,
-        },
+        data: { capture_ms: screenshotMs, data_chars: screenshot_b64.length, splat_count: v.splatCount },
         level: 'info',
       });
-      span.setAttribute('ai.screenshot_capture_ms', screenshotMs);
 
       const history: AgentTurn[] = messages.slice(-6).map((m) => ({
         role: m.role,
         text: m.text,
       }));
 
-      Sentry.addBreadcrumb({
-        category: 'agent.request',
-        message: 'sending to backend agent',
-        data: {
-          message_preview: text.slice(0, 120),
-          history_turns: history.length,
-          camera_mode: camera.mode,
-        },
-        level: 'info',
-      });
-
-      const res = await apiClient.agentAct({
+      await apiClient.agentActStream({
         message: text,
         screenshot_b64,
         camera,
         history,
-      });
-
-      span.setAttribute('ai.action_count', res.actions.length);
-      span.setAttribute('ai.action_types', res.actions.map((a) => a.type).join(','));
-      span.setAttribute('ai.answer_length', res.answer.length);
-      span.setStatus({ code: 1 });
-
-      Sentry.addBreadcrumb({
-        category: 'agent.response',
-        message: 'agent responded',
-        data: {
-          answer_preview: res.answer.slice(0, 120),
-          action_count: res.actions.length,
-          action_types: res.actions.map((a) => a.type),
+        onDelta: (delta) => {
+          setStreamingText((t) => (t ?? '') + delta);
         },
-        level: 'info',
+        onDone: (res) => {
+          setStreamingText(null);
+          setMessages((m) => [...m, { role: 'assistant', text: res.answer }]);
+          if (res.diagram) setDiagram(res.diagram);
+
+          span.setAttribute('ai.action_count', res.actions.length);
+          span.setAttribute('ai.action_types', res.actions.map((a) => a.type).join(','));
+          span.setAttribute('ai.answer_length', res.answer.length);
+          span.setStatus({ code: 1 });
+
+          Sentry.addBreadcrumb({
+            category: 'agent.response',
+            message: 'agent responded',
+            data: {
+              answer_preview: res.answer.slice(0, 120),
+              action_count: res.actions.length,
+              action_types: res.actions.map((a) => a.type),
+            },
+            level: 'info',
+          });
+
+          for (const action of res.actions) {
+            Sentry.addBreadcrumb({
+              category: 'agent.action',
+              message: `execute: ${action.type}`,
+              data: {
+                type: action.type,
+                ...(action.direction ? { direction: action.direction } : {}),
+                ...(action.amount != null ? { amount: action.amount } : {}),
+                ...(action.label ? { label: action.label } : {}),
+              },
+              level: 'info',
+            });
+          }
+
+          executeActions(v, res.actions);
+        },
       });
-
-      setMessages((m) => [...m, { role: 'assistant', text: res.answer }]);
-
-      // Breadcrumb per action so the trace shows exactly what the agent did.
-      for (const action of res.actions) {
-        Sentry.addBreadcrumb({
-          category: 'agent.action',
-          message: `execute: ${action.type}`,
-          data: {
-            type: action.type,
-            ...(action.direction ? { direction: action.direction } : {}),
-            ...(action.amount != null ? { amount: action.amount } : {}),
-            ...(action.label ? { label: action.label } : {}),
-          },
-          level: 'info',
-        });
-      }
-
-      executeActions(v, res.actions);
     } catch (err) {
       span.setStatus({ code: 2, message: err instanceof Error ? err.message : 'error' });
       Sentry.captureException(err, {
@@ -239,6 +232,7 @@ export function AgentChat({ viewerRef }: Props) {
       ]);
     } finally {
       span.end();
+      setStreamingText(null);
       setBusy(false);
     }
   }, [busy, messages, viewerRef]);
@@ -272,6 +266,17 @@ export function AgentChat({ viewerRef }: Props) {
         </button>
       )}
 
+      {/* Diagram panel — top-left, shown when agent zooms/focuses an object */}
+      {diagram && (
+        <div className="agent-diagram glass" data-testid="agent-diagram">
+          <div className="agent-diagram-header">
+            <span>Analysis</span>
+            <button className="agent-diagram-close" onClick={() => setDiagram(null)}>✕</button>
+          </div>
+          <pre className="agent-diagram-pre">{diagram}</pre>
+        </div>
+      )}
+
       {open && (
         <div className="agent-chat glass" data-testid="agent-chat">
           <div className="agent-chat-header">
@@ -292,7 +297,7 @@ export function AgentChat({ viewerRef }: Props) {
           </div>
 
           <div className="agent-chat-messages" data-testid="agent-messages">
-            {messages.length === 0 && (
+            {messages.length === 0 && streamingText === null && (
               <p className="agent-hint">
                 Ask me to navigate: "go to the fountain", "highlight the door",
                 "what is this object?", "rotate clockwise", "zoom in"…
@@ -308,10 +313,13 @@ export function AgentChat({ viewerRef }: Props) {
                 <span className="agent-msg-text">{m.text}</span>
               </div>
             ))}
-            {busy && (
+            {streamingText !== null && (
               <div className="agent-msg agent-msg-assistant">
                 <span className="agent-msg-role">Agent</span>
-                <span className="agent-msg-text agent-thinking">Thinking…</span>
+                <span className="agent-msg-text">
+                  {streamingText || <span className="agent-thinking">Thinking…</span>}
+                  {streamingText && <span className="agent-cursor" aria-hidden>▊</span>}
+                </span>
               </div>
             )}
             <div ref={bottomRef} />
