@@ -85,3 +85,4 @@ byte-for-byte → Vite proxy wiring → persistence across backend restart → f
 error paths. The only thing not verifiable headlessly is the on-GPU pixel render, which needs a
 real browser/GPU (the renderer logic itself is unit-tested).
 # ironbook
+# ironbook
