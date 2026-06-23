@@ -6,7 +6,7 @@
 
 **🏆 UC Berkeley AI Hackathon — Toolbox Grand Prize Winner**
 
-<video src="https://github.com/PraneethO/ironbook/releases/download/v1.0.0/ironbook_demo.mp4" controls width="100%"></video>
+<video src="assets/demo.mp4" controls width="100%"></video>
 
 ---
 
@@ -177,6 +177,6 @@ cd frontend && npm run build
 
 ## Built at UC Berkeley AI Hackathon
 
-**Praneeth Otthi** · **Langdon**
+**Praneeth Otthi** · **Langdon** · **Sanjay Sundaram**
 
 Won the **Toolbox Grand Prize** at the UC Berkeley AI Hackathon.
