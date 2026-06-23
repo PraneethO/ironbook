@@ -6,7 +6,9 @@
 
 **🏆 UC Berkeley AI Hackathon — Toolbox Grand Prize Winner**
 
-<video src="assets/demo.mp4" controls width="100%"></video>
+[![Ironbook demo](assets/demo_preview.gif)](https://github.com/PraneethO/ironbook/releases/download/v1.0.0/ironbook_demo.mp4)
+
+*Click to watch full demo*
 
 ---
 
