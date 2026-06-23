@@ -1,0 +1,13 @@
+fastapi>=0.138,<0.140
+uvicorn[standard]>=0.49,<0.50
+python-multipart>=0.0.32,<0.1
+pillow>=12,<13
+pillow-heif>=0.18            # HEIC/HEIF support for iPhone photos
+numpy>=2.4,<3
+onnxruntime>=1.22,<2          # on-device monocular-depth reconstruction (CPU/CoreML)
+httpx>=0.28,<0.29
+anthropic>=0.69                # reasoning navigation agent (Claude vision + tool use)
+python-dotenv>=1.0,<2          # load backend/.env (ANTHROPIC_API_KEY etc.)
+sentry-sdk[fastapi]>=2.0,<3    # error tracking + performance + AI monitoring
+langfuse>=3.0,<4               # LLM observability (prompt traces, token usage, scoring)
+pytest>=9,<10
