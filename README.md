@@ -4,7 +4,7 @@
 
 ### A living manual you can walk into.
 
-**🏆 UC Berkeley AI Hackathon — Toolbox Grand Prize Winner**
+**🏆 UC Berkeley AI Hackathon — Toolbox Grand Prize Winner ($5000)**
 
 [![Ironbook demo](assets/demo_preview.gif)](https://github.com/PraneethO/ironbook/releases/download/v1.0.0/ironbook_demo.mp4)
 
@@ -179,6 +179,6 @@ cd frontend && npm run build
 
 ## Built at UC Berkeley AI Hackathon
 
-**Praneeth Otthi** · **Langdon** · **Sanjay Sundaram**
+**Praneeth Otthi** · **Langdon Huynh** · **Sanjay Sundaram**
 
 Won the **Toolbox Grand Prize** at the UC Berkeley AI Hackathon.
